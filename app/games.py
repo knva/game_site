@@ -22,6 +22,7 @@ from starlette.responses import StreamingResponse
 from . import config
 from .auth import me
 from .db import _lock, db
+from .farm import CROPS
 from .gameconfig import config_get
 from .http import json_response, parse_body
 from .wallet import (add_daily_earned, add_slot_daily_earned, change_points, daily_earned,
@@ -98,6 +99,121 @@ GOMOKU_MIN_MOVES = 4           # 少于 4 步的对局不发奖励
 GOMOKU_PAIR_WINDOW = 3600      # 重复对手统计窗口(秒)
 GOMOKU_PAIR_LIMIT = 3          # 窗口内同一对手超过该局数则减半奖励
 GOMOKU_DAILY_CAP = 300         # 五子棋每日奖励上限
+
+# ============ Issue #28:玩法收益模型(常量集中 + 目标返奖率) ============
+# 返奖率 rtp = 期望产出 / 门票。设计目标:
+#   黄金矿工:门票回收玩法(高 rtp),靠每日 10 次次数限制封顶;
+#   老虎机/转盘:抽奖玩法(rtp < 100%),期望上消耗积分(金币回收池),由每日上限与翻倍机制兜底防无界;
+#   音乐:免费无门票,收益=得分,依赖玩家水平,rtp 不适用。
+def _slot_expected_payout():
+    """老虎机每注期望产出:三连 P(s)^3×x3 + 对子 2×PAIR×ΣP(s)²(1-P(s))"""
+    total = sum(SLOT_SYMBOLS[s]["w"] for s in SLOT_SYMBOLS)
+    p = {s: SLOT_SYMBOLS[s]["w"] / total for s in SLOT_SYMBOLS}
+    e = sum(p[s] ** 3 * SLOT_SYMBOLS[s]["x3"] for s in SLOT_SYMBOLS)
+    e += 2 * SLOT_PAIR_PAY * sum(p[s] ** 2 * (1 - p[s]) for s in SLOT_SYMBOLS)
+    return round(e, 2)
+
+
+def _slot_expected_var():
+    """老虎机期望产出方差:Var = E[X²] - E[X]²"""
+    total = sum(SLOT_SYMBOLS[s]["w"] for s in SLOT_SYMBOLS)
+    p = {s: SLOT_SYMBOLS[s]["w"] / total for s in SLOT_SYMBOLS}
+    e2 = sum(p[s] ** 3 * SLOT_SYMBOLS[s]["x3"] ** 2 for s in SLOT_SYMBOLS)
+    e2 += 2 * SLOT_PAIR_PAY ** 2 * sum(p[s] ** 2 * (1 - p[s]) for s in SLOT_SYMBOLS)
+    e = _slot_expected_payout()
+    return round(e2 - e * e, 1)
+
+
+def _wheel_expected_prize():
+    """转盘每次期望产出:Σ(prize×weight)/Σweight("再转一次"按 prize=-1 计,期望值仍准确)"""
+    total = sum(WHEEL_WEIGHTS)
+    return round(sum(WHEEL_SECTORS[i]["prize"] * WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))) / total, 2)
+
+
+def _wheel_expected_var():
+    """转盘期望产出方差"""
+    total = sum(WHEEL_WEIGHTS)
+    e = _wheel_expected_prize()
+    e2 = sum(WHEEL_SECTORS[i]["prize"] ** 2 * WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))) / total
+    return round(e2 - e * e, 1)
+
+
+GAME_ECONOMY = {
+    # 黄金矿工:门票 80,奖励在 [pay_min,pay_max] 上均匀随机(期望 150,方差 850),
+    # 返奖率 187.5%(高于 100%,属门票回收玩法,靠每日 10 局次数封顶防刷)
+    "goldminer": {
+        "ticket": GOLDMINER_TICKET,
+        "pay_range": [GOLDMINER_PAY_MIN, GOLDMINER_PAY_MAX],
+        "expected": round((GOLDMINER_PAY_MIN + GOLDMINER_PAY_MAX) / 2, 1),
+        "variance": round(((GOLDMINER_PAY_MAX - GOLDMINER_PAY_MIN + 1) ** 2 - 1) / 12, 1),
+        "daily_limit": GOLDMINER_DAILY_LIMIT,
+        "rtp": round(((GOLDMINER_PAY_MIN + GOLDMINER_PAY_MAX) / 2) / GOLDMINER_TICKET, 3),
+    },
+    # 水果老虎机:门票 5,期望产出 ≈3.20(三连大奖 + 对子保底),返奖率 ≈64%
+    # 目标设计:rtp 控制在 60%~70%,中奖体验频繁但对期望为负,配合每日 300 上限防套利
+    "slot": {
+        "ticket": SLOT_COST,
+        "pay_range": [0, max(SLOT_SYMBOLS[s]["x3"] for s in SLOT_SYMBOLS)],
+        "expected": _slot_expected_payout(),
+        "variance": _slot_expected_var(),
+        "daily_limit": SLOT_DAILY_MAX,
+        "rtp": round(_slot_expected_payout() / SLOT_COST, 3),
+    },
+    # 幸运大转盘:门票 10,期望产出 ≈6.99,返奖率 ≈69.9%(低于 100%,抽奖类积分回收)
+    # "再转一次"按概率 6% 额外赠券,实际期望再上浮约 6%×6.99≈0.42,仍为负期望设计
+    "wheel": {
+        "ticket": WHEEL_COST,
+        "pay_range": [min(s["prize"] for s in WHEEL_SECTORS), max(s["prize"] for s in WHEEL_SECTORS)],
+        "expected": _wheel_expected_prize(),
+        "variance": _wheel_expected_var(),
+        "daily_limit": None,   # 无独立日上限,受频率限制与全局每日可赚上限约束
+        "rtp": round(_wheel_expected_prize() / WHEEL_COST, 3),
+    },
+    # 音乐游戏:免费(无门票),收益 = 得分直接入账,期望随玩家水平(全 Perfect ≈ 谱面满分,
+    # 普通玩家约 3000~6000 分),rtp 不适用(无成本)
+    "rhythm": {
+        "ticket": 0,
+        "pay_range": [0, None],
+        "expected": None,
+        "expected_range": [3000, 6000],
+        "variance": None,
+        "daily_limit": config.SUBMIT_PER_DAY,
+        "rtp": None,
+    },
+}
+
+
+def game_odds():
+    """公开收益模型(/api/game/odds):各玩法门票/期望/方差/返奖率 + 农场作物收益-时长比。"""
+    farm_crops = {}
+    for c, info in CROPS.items():
+        net = info["sell"] - info["cost"]
+        farm_crops[c] = {
+            "name": info["name"], "cost": info["cost"], "sell": info["sell"],
+            "grow_sec": info["grow"], "net_profit": net,
+            "profit_per_min": round(net / info["grow"] * 60, 2),   # 收益/时长比(每分钟净收益)
+            "vip": bool(info.get("vip")),
+        }
+    short = [c for c, v in farm_crops.items() if v["grow_sec"] <= 90]
+    long_ = [c for c, v in farm_crops.items() if v["grow_sec"] > 90]
+
+    def _avg(keys):
+        return round(sum(farm_crops[k]["profit_per_min"] for k in keys) / len(keys), 2) if keys else None
+
+    return {
+        "goldminer": {"name": "黄金矿工", **GAME_ECONOMY["goldminer"]},
+        "slot": {"name": "水果老虎机", **GAME_ECONOMY["slot"]},
+        "wheel": {"name": "幸运大转盘", **GAME_ECONOMY["wheel"]},
+        "rhythm": {"name": "音乐游戏", **GAME_ECONOMY["rhythm"]},
+        "farm": {
+            "crops": farm_crops,
+            "compare": {
+                "short": {"label": "短时作物(≤90s)", "avg_profit_per_min": _avg(short), "crops": short},
+                "long": {"label": "长时作物(>90s)", "avg_profit_per_min": _avg(long_), "crops": long_},
+            },
+            "note": "profit_per_min = (售价 - 种子价) / 生长秒数 × 60;短时作物周转快,长时作物单次利润高但占用地块久",
+        },
+    }
 
 
 # ---------------- 谱面 / 地图（服务器生成，客户端无法篡改） ----------------
@@ -619,6 +735,12 @@ def wheel_free_left(conn, user_id):
 
 
 # ================= 路由 =================
+@router.get("/api/game/odds")
+def game_odds_get(request: Request):
+    """公开接口:玩法收益模型(门票/期望/方差/返奖率/农场收益时长比),无需登录"""
+    return json_response(200, game_odds())
+
+
 @router.get("/api/wheel/stats")
 def wheel_stats(request: Request):
     user = me(request)

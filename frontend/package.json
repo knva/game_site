@@ -1,0 +1,20 @@
+{
+  "name": "game-site-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "小游戏乐园渐进式外壳(Vue 3 + Vite + TypeScript),仅负责首页外壳/登录态,游戏页仍为 public/ 原生页面",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vue": "^3.5.13",
+    "vue-tsc": "^2.1.10"
+  }
+}

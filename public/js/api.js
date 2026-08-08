@@ -53,6 +53,8 @@ const Api = {
   farmSteal: (target, slot) => Api.post("/api/farm/steal", { target, slot }),
   farmStealToggle: (open) => Api.post("/api/farm/steal-toggle", { open }),
   farmStealRandom: () => Api.get("/api/farm/steal-random"),
+  farmBatchPlant: (slots, crop) => Api.post("/api/farm/batch-plant", { slot_list: slots, crop }),
+  farmBatchHarvest: (slots) => Api.post("/api/farm/batch-harvest", { slot_list: slots }),
 
   spin: (requestId) => Api.post("/api/wheel/spin", { request_id: requestId }),
   wheelStats: () => Api.get("/api/wheel/stats"),
