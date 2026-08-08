@@ -108,6 +108,7 @@
     <div class="hud">
       <span class="stat">💰 余额 <b id="hud-points" class="big">-</b></span>
       <span class="stat">单次花费 <b style="color:var(--bad)">10 💎</b></span>
+      <span class="stat">🔁 免费转 <b id="hud-free" style="color:var(--ok)">0</b> 次</span>
       <span style="flex:1"></span>
       <button class="btn" id="btn-spin">🎡 开始转盘（10💎）</button>
     </div>
@@ -198,13 +199,22 @@ function applyRot() {
 
 /* ================= 游戏逻辑 ================= */
 let myPoints = 0;
+let freeLeft = 0;   // 未过期免费转券数量(服务端权威)
 let pending = null;
+
+function uuid() {
+  return (crypto.randomUUID ? crypto.randomUUID()
+          : (Date.now().toString(36) + Math.random().toString(36).slice(2)));
+}
 
 function hud() {
   document.getElementById("hud-points").textContent = myPoints;
-  const busy = spinning || myPoints < 10;
+  document.getElementById("hud-free").textContent = freeLeft;
+  const busy = spinning || (myPoints < 10 && freeLeft <= 0);
   document.getElementById("btn-spin").disabled = busy;
   document.getElementById("spin-btn").disabled = busy;
+  document.getElementById("btn-spin").textContent =
+    freeLeft > 0 ? `🎡 免费转一次` : `🎡 开始转盘（10💎）`;
 }
 
 function onRest() {
@@ -213,8 +223,8 @@ function onRest() {
   pending = null;
   const banner = document.getElementById("result");
   if (p.free) {
-    banner.innerHTML = `🔁 恭喜！<b style="color:var(--ok)">再转一次</b>（免费）`;
-    toast("再转一次！免费抽奖", "ok");
+    banner.innerHTML = `🔁 恭喜！<b style="color:var(--ok)">免费再转一次</b>（已发放免费券）`;
+    toast("免费再转一次！", "ok");
     glow();
     setTimeout(spin, 1000);
   } else {
@@ -238,10 +248,11 @@ function glow() {
 
 async function spin() {
   if (!requireLogin()) return;
-  if (spinning || myPoints < 10) return;
+  if (spinning || (myPoints < 10 && freeLeft <= 0)) return;
   try {
-    const r = await Api.spin();
+    const r = await Api.spin(uuid());
     myPoints = r.points;
+    freeLeft = r.free_left;
     spinning = true;
     pending = r;
     document.getElementById("result").textContent = "转动中…";
@@ -300,6 +311,8 @@ async function refreshStats() {
     document.getElementById("stat-total").textContent = s.total;
     document.getElementById("stat-mine").textContent = s.my_spins;
     document.getElementById("stat-winrate").textContent = s.win_rate + "%";
+    freeLeft = s.free_tickets;
+    hud();
     const ticker = document.getElementById("jackpot-list");
     if (s.jackpots.length) {
       const row = j => `<li>🏆 <b>${escapeHtml(j.username)}</b> 转到 ${escapeHtml(j.name)} · ${fmtTime(j.created_at)}</li>`;

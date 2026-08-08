@@ -106,6 +106,7 @@ VIP_PLANS = {
 }
 
 WHEEL_COST = 10
+WHEEL_FREE_TTL = 86400   # 免费券有效期(秒)=24 小时
 WHEEL_SECTORS = [
     {"name": "+5分", "prize": 5}, {"name": "+10分", "prize": 10},
     {"name": "0分", "prize": 0}, {"name": "+50分", "prize": 50},
@@ -350,7 +351,12 @@ def init_db():
             token TEXT PRIMARY KEY,
             user_id INTEGER NOT NULL,
             pending INTEGER NOT NULL,
-            created_at REAL NOT NULL)""")
+            created_at REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending')""")
+        # 老库迁移:slot_pending 补 status 状态机列
+        _sp_cols = [r["name"] for r in conn.execute("PRAGMA table_info(slot_pending)").fetchall()]
+        if "status" not in _sp_cols:
+            conn.execute("ALTER TABLE slot_pending ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
         conn.execute("""CREATE TABLE IF NOT EXISTS checkins(
             user_id INTEGER NOT NULL,
             day TEXT NOT NULL,
@@ -427,6 +433,18 @@ def init_db():
             name TEXT NOT NULL,
             prize INTEGER NOT NULL,
             created_at REAL NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS wheel_free_tickets(
+            ticket_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at REAL NOT NULL,
+            expires_at REAL NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS wheel_spin_requests(
+            user_id INTEGER NOT NULL,
+            request_id TEXT NOT NULL,
+            result TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            PRIMARY KEY(user_id, request_id))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS farm_seeds(
             user_id INTEGER NOT NULL,
             crop TEXT NOT NULL,
@@ -984,8 +1002,9 @@ def slot_spin(conn, uid, username, ip):
 
 
 def slot_collect(conn, uid, username, token, ip):
-    """领取待结算奖励（含翻倍后），受每日 300 上限约束"""
-    row = conn.execute("SELECT * FROM slot_pending WHERE token=? AND user_id=?", (token, uid)).fetchone()
+    """领取待结算奖励（含翻倍后），受每日 300 上限约束。状态机: pending → credited"""
+    row = conn.execute("SELECT * FROM slot_pending WHERE token=? AND user_id=? AND status='pending'",
+                       (token, uid)).fetchone()
     if not row:
         return None, None
     today = time.strftime("%Y-%m-%d")
@@ -993,10 +1012,15 @@ def slot_collect(conn, uid, username, token, ip):
     pending = min(row["pending"], SLOT_PENDING_MAX)
     if pending > remain:
         pending = max(0, remain)
-    conn.execute("DELETE FROM slot_pending WHERE token=?", (token,))
+    cur = conn.execute("UPDATE slot_pending SET status='credited' WHERE token=? AND status='pending'",
+                       (token,))
+    if cur.rowcount == 0:
+        return None, None   # 已被并发领取/清理，避免重复入账
     conn.commit()
     if pending > 0:
-        points = change_points(conn, uid, username, pending, "slot_win", f"老虎机领取奖励 {pending}", ip)
+        points = change_points(conn, uid, username, pending, "slot_win",
+                               f"老虎机领取奖励 {pending}", ip,
+                               idem_key=f"slot_credit:{token}")
         add_slot_daily_earned(username, pending, today)
         add_daily_earned(username, pending, today)
         return points, pending
@@ -1004,18 +1028,33 @@ def slot_collect(conn, uid, username, token, ip):
 
 
 def slot_cleanup(conn):
-    """清理过期待结算：自动入账，避免用户损失"""
-    rows = conn.execute("SELECT * FROM slot_pending WHERE created_at<?",
+    """过期待结算自动入账(不删除丢失)。状态机 pending → credited，单事务内处理，可重试且幂等。
+    幂等双保险:① UPDATE 仅对 status='pending' 生效(rowcount 守卫);
+    ② change_points 以 idem_key=slot_credit:{token} 写入 point_ledger,重复执行不会二次入账。"""
+    rows = conn.execute("SELECT * FROM slot_pending WHERE status='pending' AND created_at<?",
                         (time.time() - SLOT_PENDING_TTL,)).fetchall()
     for r in rows:
         u = conn.execute("SELECT * FROM users WHERE id=?", (r["user_id"],)).fetchone()
-        if u:
-            conn.execute("DELETE FROM slot_pending WHERE token=?", (r["token"],))
-            conn.commit()
-            slot_collect(conn, r["user_id"], u["username"], r["token"], "")
-    if rows:
-        conn.execute("DELETE FROM slot_pending WHERE created_at<?", (time.time() - SLOT_PENDING_TTL,))
-        conn.commit()
+        if not u:
+            continue
+        cur = conn.execute("UPDATE slot_pending SET status='credited' WHERE token=? AND status='pending'",
+                           (r["token"],))
+        if cur.rowcount == 0:
+            continue   # 已被并发清理/领取
+        pending = min(r["pending"], SLOT_PENDING_MAX)
+        change_points(conn, r["user_id"], u["username"], pending,
+                      "slot_win", f"老虎机过期待结算自动入账 {pending}", "",
+                      idem_key=f"slot_credit:{r['token']}")
+        add_slot_daily_earned(u["username"], pending, time.strftime("%Y-%m-%d"))
+        add_daily_earned(u["username"], pending, time.strftime("%Y-%m-%d"))
+    conn.commit()
+
+
+def wheel_free_left(conn, user_id):
+    """当前用户未过期、未使用的免费转券数量"""
+    return conn.execute(
+        "SELECT COUNT(*) c FROM wheel_free_tickets WHERE user_id=? AND used=0 AND expires_at>?",
+        (user_id, time.time())).fetchone()["c"]
 
 
 # ---------------- HTTP 处理 ----------------
@@ -1131,12 +1170,14 @@ class Handler(BaseHTTPRequestHandler):
                 my_recent = [dict(r) for r in conn.execute(
                     "SELECT name, prize, created_at FROM wheel_logs WHERE user_id=? "
                     "ORDER BY id DESC LIMIT 8", (user["id"],)).fetchall()]
+                free_tickets = wheel_free_left(conn, user["id"])
             return self._send(200, {
                 "total": total,
                 "my_spins": my,
                 "win_rate": round(win / total * 100, 1) if total else 0,
                 "jackpots": jackpots,
                 "my_recent": my_recent,
+                "free_tickets": free_tickets,
             })
 
         if path == "/api/mail":
@@ -2013,26 +2054,62 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(401, {"error": "未登录"})
             if not rate_check(f"spin:{user['username']}", 60, 3600):
                 return self._send(429, {"error": "转盘过于频繁"})
+            request_id = str(data.get("request_id", "")).strip()
             with _lock, db() as conn:
-                if user["points"] < WHEEL_COST:
+                # 幂等:同一 request_id 直接返回上次结果(不重复扣费/扣券/发券)
+                if request_id:
+                    cached = conn.execute(
+                        "SELECT result FROM wheel_spin_requests WHERE user_id=? AND request_id=?",
+                        (user["id"], request_id)).fetchone()
+                    if cached:
+                        return self._send(200, json.loads(cached["result"]))
+                # 优先原子消费一张未过期免费券(不扣积分);无券才扣积分
+                used_free = False
+                ticket = conn.execute(
+                    "SELECT ticket_id FROM wheel_free_tickets "
+                    "WHERE user_id=? AND used=0 AND expires_at>? ORDER BY created_at LIMIT 1",
+                    (user["id"], time.time())).fetchone()
+                if ticket:
+                    cur = conn.execute(
+                        "UPDATE wheel_free_tickets SET used=1 WHERE ticket_id=? AND used=0",
+                        (ticket["ticket_id"],))
+                    used_free = cur.rowcount > 0
+                if not used_free and user["points"] < WHEEL_COST:
                     return self._send(400, {"error": "积分不足"})
                 idx = random.choices(range(len(WHEEL_SECTORS)), weights=WHEEL_WEIGHTS, k=1)[0]
                 sector = WHEEL_SECTORS[idx]
                 prize = sector["prize"]
-                if prize == -1:
+                free = prize == -1
+                if used_free:
+                    points = conn.execute("SELECT points FROM users WHERE id=?",
+                                          (user["id"],)).fetchone()["points"]
+                elif free:
                     points = change_points(conn, user["id"], user["username"], -WHEEL_COST,
                                            "wheel_spin", "转盘：再转一次", ip)
-                    free = True
                 else:
                     points = change_points(conn, user["id"], user["username"], prize - WHEEL_COST,
                                            "wheel_spin", f"转盘：{sector['name']}", ip)
-                    free = False
+                if free:
+                    # 抽中“再转一次”发放一次性免费券(24 小时有效)
+                    conn.execute(
+                        "INSERT INTO wheel_free_tickets(ticket_id,user_id,created_at,expires_at,used) "
+                        "VALUES(?,?,?,?,0)",
+                        (secrets.token_hex(16), user["id"], time.time(),
+                         time.time() + WHEEL_FREE_TTL))
                 conn.execute("INSERT INTO wheel_logs(user_id, username, sector, name, prize, created_at) "
                              "VALUES(?,?,?,?,?,?)",
                              (user["id"], user["username"], idx, sector["name"], prize, time.time()))
+                free_left = wheel_free_left(conn, user["id"])
+                result = {"ok": True, "sector": idx, "name": sector["name"],
+                          "prize": prize, "free": free, "points": points, "free_left": free_left}
+                if request_id:
+                    conn.execute("DELETE FROM wheel_spin_requests WHERE user_id=? AND created_at<?",
+                                 (user["id"], time.time() - 86400))  # 顺手清理旧幂等记录
+                    conn.execute("INSERT OR REPLACE INTO wheel_spin_requests(user_id,request_id,result,created_at) "
+                                 "VALUES(?,?,?,?)",
+                                 (user["id"], request_id, json.dumps(result), time.time()))
                 conn.commit()
-            return self._send(200, {"ok": True, "sector": idx, "name": sector["name"],
-                                    "prize": prize, "free": free, "points": points})
+            return self._send(200, result)
 
         # ============ 站内信 ============
         if path == "/api/mail/send":
@@ -2182,7 +2259,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not row:
                     return self._send(404, {"error": "房间不存在"})
                 if row["status"] != "waiting":
-                    return self._send(400, {"error": "房间已满或已开始"})
+                    return self._send(409, {"error": "房间已满或已开始"})
                 if row["player_black"] == user["id"]:
                     return self._send(400, {"error": "你已经在房间里了"})
                 conn.execute("UPDATE gomoku_rooms SET player_white=?, status='playing', last_move_at=? WHERE code=?",
@@ -2247,18 +2324,23 @@ class Handler(BaseHTTPRequestHandler):
                 row = conn.execute("SELECT * FROM gomoku_rooms WHERE code=?", (code,)).fetchone()
                 if not row:
                     return self._send(404, {"error": "房间不存在"})
+                uid = user["id"]
                 if row["status"] == "waiting":
+                    # 仅房主(player_black 创建者)可取消/删除等待中的房间;身份以服务端登录用户为准
+                    if row["player_black"] != uid:
+                        return self._send(403, {"error": "只有房主可以取消房间"})
                     conn.execute("DELETE FROM gomoku_rooms WHERE code=?", (code,))
                     conn.commit()
+                    log(conn, uid, user["username"], "gomoku_cancel", f"取消房间 {code}", ip=ip)
                     return self._send(200, {"ok": True})
                 if row["status"] == "playing":
-                    uid = user["id"]
-                    if uid in (row["player_black"], row["player_white"]):
-                        opp = row["player_white"] if uid == row["player_black"] else row["player_black"]
-                        conn.execute("UPDATE gomoku_rooms SET status='over', winner=?, reason='对手认输' WHERE code=?",
-                                     (opp, code))
-                        conn.commit()
-                        _finish_gomoku(conn, code, opp, "对手认输", ip)
+                    if uid not in (row["player_black"], row["player_white"]):
+                        return self._send(403, {"error": "你不是本局玩家"})
+                    opp = row["player_white"] if uid == row["player_black"] else row["player_black"]
+                    conn.execute("UPDATE gomoku_rooms SET status='over', winner=?, reason='对手认输' WHERE code=?",
+                                 (opp, code))
+                    conn.commit()
+                    _finish_gomoku(conn, code, opp, "对手认输", ip)
             _broadcast(code, None)
             return self._send(200, {"ok": True})
 
