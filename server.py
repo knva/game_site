@@ -291,8 +291,15 @@ def _unsubscribe(code, q, user_id=None):
 
 # ---------------- 数据库 ----------------
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    # #17 SQLite WAL + busy_timeout + 外键(PostgreSQL 迁移见 app/db.py 的 DATABASE_URL 降级)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
+    except sqlite3.Error:
+        pass
     return conn
 
 
