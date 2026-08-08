@@ -81,12 +81,15 @@ const Api = {
   vipBuy: (days) => Api.post("/api/vip/buy", { days }),
 
   adminStats: () => Api.get("/api/admin/stats"),
+  adminDashboard: () => Api.get("/api/admin/dashboard"),
+  adminUserDetail: (name) => Api.get(`/api/admin/user-detail?name=${encodeURIComponent(name)}`),
+  adminKickSession: (user_id, name) => Api.post("/api/admin/kick-session", { user_id, name }),
   adminUsers: (search, page) => Api.get(`/api/admin/users?search=${encodeURIComponent(search)}&page=${page}`),
   adminLogs: (username, action, page) =>
     Api.get(`/api/admin/logs?username=${encodeURIComponent(username)}&action=${encodeURIComponent(action)}&page=${page}`),
   adminBottles: () => Api.get("/api/admin/bottles"),
   adminSetBalance: (user_id, amount, note) => Api.post("/api/admin/set-balance", { user_id, amount, note }),
-  adminToggle: (user_id) => Api.post("/api/admin/toggle-status", { user_id }),
+  adminToggle: (user_id, reason) => Api.post("/api/admin/toggle-status", { user_id, reason }),
   adminMail: (to, title, content) => Api.post("/api/admin/mail", { to, title, content }),
   adminDelBottle: (id) => Api.post("/api/admin/del-bottle", { id }),
 };
