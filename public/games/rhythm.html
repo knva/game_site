@@ -187,6 +187,7 @@ let running = false, over = false, submitted = false;
 let songStart = 0, score = 0, combo = 0, maxCombo = 0, perfects = 0, goods = 0, misses = 0, total = 0;
 let judgeText = null;
 let gameToken = "", maxScore = 0;
+let timeline = [];   // 按键时间线(结算时提交服务器重判)
 const APPROACH = 1.9;
 const SPAWN_Y = -46, HIT_Y = 470;
 
@@ -308,7 +309,7 @@ function finish() {
   submitted = true;
   running = false; over = true;
   document.getElementById("btn-start").disabled = false;
-  Api.gameEnd("rhythm", gameToken, score, { perfect: perfects, good: goods, miss: misses })
+  Api.gameEnd("rhythm", gameToken, score, { timeline })
     .then(r => toast(r.is_best ? `🎉 新纪录 ${r.earned} 分！` : `已结算 +${r.earned} 分`, "ok"))
     .catch(e => toast(e.message, "err"))
     .finally(() => { refreshPoints(); refreshRank(); });
@@ -327,6 +328,9 @@ document.addEventListener("keydown", e => {
   const i = KEYS.indexOf(e.code);
   if (i >= 0) {
     e.preventDefault();
+    if (running && !over && audioCtx) {
+      timeline.push({ t: Math.round((audioCtx.currentTime - songStart) * 1000) / 1000, lane: i });
+    }
     judge(i);
   }
 });
