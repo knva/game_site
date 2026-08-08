@@ -343,6 +343,18 @@ def init_db():
             crop TEXT NOT NULL,
             count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(user_id, crop))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS point_ledger(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            business TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            balance_after INTEGER NOT NULL,
+            biz_no TEXT UNIQUE,
+            request_id TEXT,
+            detail TEXT,
+            ip TEXT,
+            created_at REAL NOT NULL)""")
         conn.commit()
 
 
@@ -426,13 +438,31 @@ def _rate_peek(key, window):
         return len(q)
 
 
-# ---------------- 用户余额（所有变动都走这里 + 记日志） ----------------
-def change_points(conn, user_id, username, amount, action, detail="", ip=""):
+# ---------------- 用户余额（所有变动都走这里 + 不可变流水 + 日志） ----------------
+def change_points(conn, user_id, username, amount, action, detail="", ip="", idem_key=None):
+    """统一积分变动入口:更新余额 + 写 point_ledger 不可变流水 + 写日志。
+    idem_key 非空时幂等:同一业务单号只生效一次(防重复发奖/扣款)。"""
     with _lock:
-        conn.execute("UPDATE users SET points = points + ? WHERE id=?", (amount, user_id))
-        conn.commit()
+        if idem_key:
+            exists = conn.execute("SELECT 1 FROM point_ledger WHERE biz_no=?", (idem_key,)).fetchone()
+            if exists:
+                conn.commit()
+                return conn.execute("SELECT points FROM users WHERE id=?", (user_id,)).fetchone()["points"]
+        if amount < 0:
+            cur = conn.execute("UPDATE users SET points = points + ? WHERE id=? AND points + ? >= 0",
+                               (amount, user_id, amount))
+            if cur.rowcount == 0:
+                conn.rollback()
+                raise ValueError("积分不足")
+        else:
+            conn.execute("UPDATE users SET points = points + ? WHERE id=?", (amount, user_id))
+        balance = conn.execute("SELECT points FROM users WHERE id=?", (user_id,)).fetchone()["points"]
+        conn.execute(
+            "INSERT INTO point_ledger(user_id,username,business,amount,balance_after,biz_no,request_id,detail,ip,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (user_id, username, action, amount, balance, idem_key, None, detail, ip, time.time()))
         log(conn, user_id, username, action, detail, amount, ip)
-        return conn.execute("SELECT points FROM users WHERE id=?", (user_id,)).fetchone()["points"]
+        return balance
 
 
 def get_user_by_name(conn, name):
@@ -1460,7 +1490,8 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("UPDATE game_sessions SET used=1 WHERE token=?", (token,))
                 conn.execute("UPDATE users SET exp=exp+? WHERE id=?", (max(1, earned // 20), user["id"]))  # 结算经验
                 points = change_points(conn, user["id"], user["username"], earned,
-                                       "game_award", f"{GAMES[game]['name']} 得分 {score}", ip)
+                                       "game_award", f"{GAMES[game]['name']} 得分 {score}", ip,
+                                       idem_key=f"settle:{token}")
                 prev = conn.execute("SELECT score FROM scores WHERE game=? AND user_id=?",
                                     (game, user["id"])).fetchone()
                 is_best = prev is None or score > prev["score"]
