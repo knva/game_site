@@ -119,6 +119,16 @@ BOTTLE_COST = 2
 BOTTLE_PICK_DAILY = 2     # 每天最多捡 2 个
 BOTTLE_THROW_DAILY = 5    # 每天最多扔 5 个（VIP +1）
 
+# 内容敏感词清单(仅用于举报时提示"涉嫌违规内容",不自动处理/不自动隐藏)
+SENSITIVE_WORDS = ["作弊", "外挂", "脚本", "刷分", "代练", "赌博", "色情", "诈骗", "木马", "病毒", "封号"]
+
+
+def _contains_sensitive(text):
+    """内容是否命中敏感词(举报原因提示用,不做任何自动处理)"""
+    if not text:
+        return False
+    return any(w in text for w in SENSITIVE_WORDS)
+
 # 黄金矿工门票与经济
 GOLDMINER_DAILY_LIMIT = 10
 GOLDMINER_TICKET = 80
@@ -515,6 +525,34 @@ def init_db():
             updated_by TEXT,
             created_at REAL NOT NULL,
             PRIMARY KEY(name, version))""")
+        # Issue #22:风险事件(异常对局/账号风险,等级+状态流转 pending→reviewed)
+        conn.execute("""CREATE TABLE IF NOT EXISTS risk_events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            rule TEXT NOT NULL,
+            level TEXT NOT NULL DEFAULT 'medium',
+            status TEXT NOT NULL DEFAULT 'pending',
+            note TEXT,
+            created_at REAL NOT NULL)""")
+        # Issue #23:内容举报(漂流瓶/站内信)审核队列
+        conn.execute("""CREATE TABLE IF NOT EXISTS reports(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content_type TEXT NOT NULL,
+            content_id INTEGER NOT NULL,
+            reporter_id INTEGER NOT NULL,
+            reason TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            handled_by TEXT,
+            note TEXT,
+            created_at REAL NOT NULL)""")
+        # 老库迁移：漂流瓶 / 站内信隐藏标记(hide 后不出现在公开列表)
+        _b_cols = [r["name"] for r in conn.execute("PRAGMA table_info(bottles)").fetchall()]
+        if "hidden" not in _b_cols:
+            conn.execute("ALTER TABLE bottles ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+        _m_cols = [r["name"] for r in conn.execute("PRAGMA table_info(mail)").fetchall()]
+        if "hidden" not in _m_cols:
+            conn.execute("ALTER TABLE mail ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
 
@@ -1224,6 +1262,14 @@ def _gomoku_daily_earned(conn, username, today):
     return row["s"]
 
 
+def _add_risk_event(conn, user_id, username, rule, level="medium", note=""):
+    """写入风险事件(异常对局/账号风险中心)。默认 pending,由管理员 review 后置 reviewed。"""
+    conn.execute(
+        "INSERT INTO risk_events(user_id,username,rule,level,status,note,created_at) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (user_id, username, rule, level, "pending", note, time.time()))
+
+
 def _gomoku_risk_check(conn, row, moves):
     """对局风控：过短对局 / 同 IP / 重复对手。返回 (命中列表, 奖励系数)。"""
     risks, mult = [], 1.0
@@ -1295,6 +1341,18 @@ def _finish_gomoku(conn, code, winner, reason, ip="", loser=None):
         loser = pb
     moves = row["moves"] or sum(1 for c in (json.loads(row["board"]) or []) if c)
     risks, mult = _gomoku_risk_check(conn, row, moves)
+    # Issue #22:命中风控(同 IP / 重复对手)写入风险事件,双方玩家各记一条
+    risk_rule_map = {"same_ip": ("gomoku_same_ip", "high", "对局双方同 IP"),
+                     "repeat_opponent": ("gomoku_repeat", "medium", "窗口内重复对手")}
+    for risk_name in risks:
+        if risk_name in risk_rule_map:
+            rule, level, label = risk_rule_map[risk_name]
+            for uid in (pb, pw):
+                if uid and uid != 0:
+                    u = conn.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
+                    if u:
+                        _add_risk_event(conn, uid, u["username"], rule, level,
+                                        f"房间{code} {label}（{result}）")
     conn.execute(
         "INSERT INTO gomoku_games(code,player_black,player_white,winner,loser,result,reason,moves,risk,at,ended_at) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -1647,8 +1705,13 @@ class Handler(BaseHTTPRequestHandler):
                 rows = conn.execute(
                     """SELECT m.*, COALESCE(u.username,'系统') AS from_name
                        FROM mail m LEFT JOIN users u ON u.id=m.from_id
-                       WHERE m.to_id=? ORDER BY m.id DESC LIMIT 100""", (user["id"],)).fetchall()
-            return self._send(200, {"list": [dict(r) for r in rows]})
+                       WHERE m.to_id=? AND m.hidden=0 ORDER BY m.id DESC LIMIT 100""", (user["id"],)).fetchall()
+                out = []
+                for r in rows:
+                    d = dict(r)
+                    d["contains_sensitive"] = _contains_sensitive((r["title"] or "") + (r["content"] or ""))
+                    out.append(d)
+            return self._send(200, {"list": out})
 
         if path == "/api/farm":
             user = self._me()
@@ -1680,8 +1743,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/bottle/feed":
             with _lock, db() as conn:
                 rows = conn.execute(
-                    "SELECT id, username, content, created_at, views FROM bottles ORDER BY id DESC LIMIT 15").fetchall()
-            return self._send(200, {"list": [dict(r) for r in rows], "cost": BOTTLE_COST})
+                    "SELECT id, username, content, created_at, views FROM bottles "
+                    "WHERE hidden=0 ORDER BY id DESC LIMIT 15").fetchall()
+                out = []
+                for r in rows:
+                    d = dict(r)
+                    d["contains_sensitive"] = _contains_sensitive(r["content"])
+                    out.append(d)
+            return self._send(200, {"list": out, "cost": BOTTLE_COST})
 
         if path == "/api/bottle/pick":
             user = self._me()
@@ -1691,7 +1760,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(429, {"error": f"每天最多捡 {BOTTLE_PICK_DAILY} 个漂流瓶，明天再来吧"})
             with _lock, db() as conn:
                 row = conn.execute(
-                    """SELECT * FROM bottles WHERE picked=0 AND user_id<>?
+                    """SELECT * FROM bottles WHERE picked=0 AND user_id<>? AND hidden=0
                        ORDER BY RANDOM() LIMIT 1""", (user["id"],)).fetchone()
                 if not row:
                     return self._send(200, {"bottle": None})
@@ -1840,6 +1909,67 @@ class Handler(BaseHTTPRequestHandler):
             with _lock, db() as conn:
                 rows = conn.execute("SELECT * FROM bottles ORDER BY id DESC LIMIT 100").fetchall()
             return self._send(200, {"list": [dict(r) for r in rows]})
+
+        if path == "/api/admin/risk-list":
+            user = self._me(admin=True)
+            if user is None or user is False:
+                return self._send(403, {"error": "无权限"})
+            status = (q.get("status") or [""])[0].strip()
+            with _lock, db() as conn:
+                cond, args = [], []
+                if status in ("pending", "reviewed"):
+                    cond.append("status=?")
+                    args.append(status)
+                where = (" WHERE " + " AND ".join(cond)) if cond else ""
+                rows = conn.execute(
+                    f"SELECT * FROM risk_events{where} ORDER BY id DESC LIMIT 200", args).fetchall()
+                summary = conn.execute(
+                    """SELECT user_id, username, COUNT(*) cnt,
+                       SUM(CASE WHEN level='high' THEN 1 ELSE 0 END) high,
+                       SUM(CASE WHEN level='medium' THEN 1 ELSE 0 END) medium,
+                       SUM(CASE WHEN level='low' THEN 1 ELSE 0 END) low,
+                       SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending
+                       FROM risk_events GROUP BY user_id, username ORDER BY cnt DESC""").fetchall()
+            return self._send(200, {"list": [dict(r) for r in rows],
+                                    "summary": [dict(r) for r in summary]})
+
+        if path == "/api/admin/report-list":
+            user = self._me(admin=True)
+            if user is None or user is False:
+                return self._send(403, {"error": "无权限"})
+            status = (q.get("status") or [""])[0].strip()
+            with _lock, db() as conn:
+                cond, args = ["1=1"], []
+                if status in ("pending", "handled", "rejected"):
+                    cond.append("r.status=?")
+                    args.append(status)
+                rows = conn.execute(
+                    """SELECT r.*, COALESCE(u.username,'-') AS reporter_name
+                       FROM reports r LEFT JOIN users u ON u.id=r.reporter_id
+                       WHERE {where} ORDER BY r.id DESC LIMIT 200""".format(where=" AND ".join(cond)),
+                    args).fetchall()
+                out = []
+                for r in rows:
+                    d = dict(r)
+                    if r["content_type"] == "bottle":
+                        b = conn.execute("SELECT user_id, username, content, hidden FROM bottles WHERE id=?",
+                                         (r["content_id"],)).fetchone()
+                        d["content"] = b["content"] if b else None
+                        d["content_owner"] = b["username"] if b else None
+                        d["user_id"] = b["user_id"] if b else None
+                        d["hidden"] = bool(b["hidden"]) if b else None
+                    else:
+                        m = conn.execute("SELECT from_id, title, content, hidden FROM mail WHERE id=?",
+                                         (r["content_id"],)).fetchone()
+                        d["content"] = (m["title"] + "：" + m["content"]) if m else None
+                        d["content_owner"] = None
+                        d["user_id"] = m["from_id"] if m else None
+                        d["hidden"] = bool(m["hidden"]) if m else None
+                        if m and m["from_id"]:
+                            fr = conn.execute("SELECT username FROM users WHERE id=?", (m["from_id"],)).fetchone()
+                            d["content_owner"] = fr["username"] if fr else None
+                    out.append(d)
+            return self._send(200, {"list": out})
 
         if path == "/api/admin/stats":
             user = self._me(admin=True)
@@ -2224,6 +2354,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "未知游戏"})
             today = time.strftime("%Y-%m-%d")
             if not rate_check(f"gend:{user['username']}:{game}", SUBMIT_PER_HOUR, 3600):
+                # Issue #22:单小时提交结算次数超限 → 风险事件
+                with _lock, db() as conn:
+                    _add_risk_event(conn, user["id"], user["username"], "submit_burst", "medium",
+                                    f"{GAMES[game]['name']} 单小时提交结算超限")
                 return self._send(429, {"error": "本小时提交次数已达上限"})
             if not rate_check(f"gend:{user['username']}:{game}", SUBMIT_PER_DAY, 86400):
                 return self._send(429, {"error": "今日提交次数已达上限"})
@@ -2299,6 +2433,11 @@ class Handler(BaseHTTPRequestHandler):
                     conn.execute("INSERT OR REPLACE INTO scores(game,user_id,name,score,at) VALUES(?,?,?,?,?)",
                                  (game, user["id"], user["username"], score, time.time()))
                     conn.commit()
+                # Issue #22:接近满分且用时过短 → 风险事件(疑似外挂/超快满分结算)
+                elapsed = time.time() - sess["created_at"]
+                if score > max_score * 0.98 and elapsed < GAMES[game]["duration"] * 0.5:
+                    _add_risk_event(conn, user["id"], user["username"], "perfect_too_fast", "high",
+                                    f"{GAMES[game]['name']} 得分 {score}/{max_score}，用时 {int(elapsed)}s")
                 add_daily_earned(user["username"], earned, today)
                 log(conn, user["id"], user["username"], "game_end", f"结算 {GAMES[game]['name']}", earned, ip)
             return self._send(200, {"ok": True, "earned": earned, "points": points,
@@ -3041,6 +3180,106 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("DELETE FROM bottles WHERE id=?", (bid,))
                 conn.commit()
                 log(conn, user["id"], user["username"], "admin_op", f"删除漂流瓶 #{bid}", ip=ip)
+            return self._send(200, {"ok": True})
+
+        # ============ Issue #23:用户举报(漂流瓶 / 站内信) ============
+        if path == "/api/report":
+            user = self._me()
+            if not user:
+                return self._send(401, {"error": "未登录"})
+            ctype = str(data.get("type", ""))
+            try:
+                cid = int(data.get("id", 0))
+            except Exception:
+                return self._send(400, {"error": "参数错误"})
+            reason = str(data.get("reason", "")).strip()[:200]
+            if ctype not in ("bottle", "mail"):
+                return self._send(400, {"error": "举报类型错误"})
+            if not cid or not reason:
+                return self._send(400, {"error": "参数不完整"})
+            with _lock, db() as conn:
+                table = "bottles" if ctype == "bottle" else "mail"
+                row = conn.execute(f"SELECT 1 FROM {table} WHERE id=?", (cid,)).fetchone()
+                if not row:
+                    return self._send(404, {"error": "内容不存在或已被删除"})
+                dup = conn.execute(
+                    "SELECT 1 FROM reports WHERE content_type=? AND content_id=? AND reporter_id=?",
+                    (ctype, cid, user["id"])).fetchone()
+                if dup:
+                    return self._send(400, {"error": "你已举报过该内容"})
+                conn.execute(
+                    "INSERT INTO reports(content_type,content_id,reporter_id,reason,status,created_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (ctype, cid, user["id"], reason, "pending", time.time()))
+                conn.commit()
+                log(conn, user["id"], user["username"], "report", f"举报{ctype}#{cid}：{reason}", ip=ip)
+            return self._send(200, {"ok": True})
+
+        # ============ Issue #22:风险事件处理 ============
+        if path == "/api/admin/risk-review":
+            user = self._me(admin=True)
+            if user is None or user is False:
+                return self._send(403, {"error": "无权限"})
+            try:
+                rid = int(data.get("id", 0))
+            except Exception:
+                return self._send(400, {"error": "参数错误"})
+            note = str(data.get("note", "")).strip()[:200]
+            with _lock, db() as conn:
+                cur = conn.execute("UPDATE risk_events SET status='reviewed', note=? WHERE id=?",
+                                   (note or None, rid))
+                conn.commit()
+                if cur.rowcount == 0:
+                    return self._send(404, {"error": "风险事件不存在"})
+                log(conn, user["id"], user["username"], "admin_op", f"风险事件 #{rid} 已复核", ip=ip)
+            return self._send(200, {"ok": True})
+
+        # ============ Issue #23:举报处理(hide / reject / warn) ============
+        if path == "/api/admin/report-handle":
+            user = self._me(admin=True)
+            if user is None or user is False:
+                return self._send(403, {"error": "无权限"})
+            try:
+                rid = int(data.get("id", 0))
+            except Exception:
+                return self._send(400, {"error": "参数错误"})
+            action = str(data.get("action", ""))
+            note = str(data.get("note", "")).strip()[:200]
+            if action not in ("hide", "reject", "warn"):
+                return self._send(400, {"error": "处理动作不合法"})
+            with _lock, db() as conn:
+                rep = conn.execute("SELECT * FROM reports WHERE id=?", (rid,)).fetchone()
+                if not rep:
+                    return self._send(404, {"error": "举报不存在"})
+                if rep["status"] != "pending":
+                    return self._send(400, {"error": "该举报已处理"})
+                status = "handled"
+                if action == "hide":
+                    table = "bottles" if rep["content_type"] == "bottle" else "mail"
+                    conn.execute(f"UPDATE {table} SET hidden=1 WHERE id=?", (rep["content_id"],))
+                elif action == "warn":
+                    offender_id = None
+                    if rep["content_type"] == "bottle":
+                        b = conn.execute("SELECT user_id FROM bottles WHERE id=?",
+                                         (rep["content_id"],)).fetchone()
+                        offender_id = b["user_id"] if b else None
+                    else:
+                        m = conn.execute("SELECT from_id FROM mail WHERE id=?", (rep["content_id"],)).fetchone()
+                        offender_id = m["from_id"] if m else None
+                    if offender_id:
+                        conn.execute(
+                            "INSERT INTO mail(from_id,to_id,title,content,mtype,created_at) VALUES(?,?,?,?,?,?)",
+                            (user["id"], offender_id, "内容审核警告",
+                             f"你的{'漂流瓶' if rep['content_type'] == 'bottle' else '站内信'}因被举报已收到警告，请注意文明发言。"
+                             + (f"备注：{note}" if note else ""),
+                             "system", time.time()))
+                elif action == "reject":
+                    status = "rejected"
+                conn.execute("UPDATE reports SET status=?, handled_by=?, note=? WHERE id=?",
+                             (status, user["username"], note or None, rid))
+                conn.commit()
+                log(conn, user["id"], user["username"], "admin_op",
+                    f"处理举报 #{rid}（{action}）", ip=ip)
             return self._send(200, {"ok": True})
 
         # ============ Issue #21:游戏参数配置(draft/publish/rollback) ============

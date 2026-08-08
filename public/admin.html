@@ -129,6 +129,40 @@
     <h2>🍾 漂流瓶管理</h2>
     <ul class="bottle-feed" id="b-feed"></ul>
   </div>
+
+  <div class="game-panel">
+    <h2>⚠️ 风险中心 <span class="sub">异常对局与账号风险事件 · 按状态过滤</span></h2>
+    <div class="stat-cards" id="risk-cards"></div>
+    <div class="toolbar">
+      <select id="risk-status">
+        <option value="">全部状态</option>
+        <option value="pending">待处理</option>
+        <option value="reviewed">已处理</option>
+      </select>
+      <button class="btn mini" onclick="loadRisks()">查询</button>
+    </div>
+    <table class="tbl"><thead>
+      <tr><th>ID</th><th>用户</th><th>规则</th><th>等级</th><th>状态</th><th>备注</th><th>时间</th><th>操作</th></tr>
+    </thead><tbody id="risk-tbody"></tbody></table>
+    <h4 style="color:var(--muted);font-size:13px;margin:12px 0 6px">📋 用户风险摘要</h4>
+    <div id="risk-summary"></div>
+  </div>
+
+  <div class="game-panel">
+    <h2>🛡 内容审核队列 <span class="sub">漂流瓶 / 站内信举报</span></h2>
+    <div class="toolbar">
+      <select id="rep-status">
+        <option value="pending">待处理</option>
+        <option value="">全部状态</option>
+        <option value="handled">已处理</option>
+        <option value="rejected">已驳回</option>
+      </select>
+      <button class="btn mini" onclick="loadReports()">查询</button>
+    </div>
+    <table class="tbl"><thead>
+      <tr><th>ID</th><th>类型</th><th>内容节选</th><th>举报人</th><th>原因</th><th>状态</th><th>处理人</th><th>时间</th><th>操作</th></tr>
+    </thead><tbody id="rep-tbody"></tbody></table>
+  </div>
 </div>
 
 <script src="/js/api.js"></script>
@@ -142,7 +176,7 @@ const ACTIONS = { register: "注册", login: "登录", logout: "登出", checkin
   building_upgrade: "建筑升级", farm_steal: "偷菜", wheel_spin: "转盘", slot_spin: "老虎机", slot_double: "翻倍",
   slot_win: "老虎机领取", bottle_throw: "扔瓶", bottle_pick: "捡瓶", mail_send: "发信", admin_balance: "调余额",
   admin_mail: "系统信件", admin_op: "管理员操作", gomoku_create: "建房间", gomoku_join: "加入", gomoku_move: "落子",
-  gomoku_award: "五子棋奖励" };
+  gomoku_award: "五子棋奖励", report: "举报" };
 
 async function loadStats() {
   try {
@@ -384,12 +418,82 @@ function delBottle(id) {
   Api.adminDelBottle(id).then(() => { toast("已删除", "ok"); loadBottles(); }).catch(e => toast(e.message, "err"));
 }
 
+const RISK_RULES = { perfect_too_fast: "超快满分结算", gomoku_same_ip: "五子棋同IP", gomoku_repeat: "五子棋重复对手", submit_burst: "单小时提交超限" };
+const RISK_LV_COLOR = { high: "var(--bad)", medium: "var(--gold)", low: "var(--ok)" };
+
+async function loadRisks() {
+  try {
+    const d = await Api.riskList(document.getElementById("risk-status").value);
+    document.getElementById("risk-cards").innerHTML = [
+      ["🚨", d.summary.reduce((a, s) => a + s.high, 0), "高危事件"],
+      ["⚠️", d.summary.reduce((a, s) => a + s.medium, 0), "中危事件"],
+      ["👤", d.summary.length, "涉险用户"],
+      ["📥", d.list.filter(r => r.status === "pending").length, "待处理"],
+    ].map(([e, v, k]) => `<div class="stat-card"><div class="v">${e} ${v}</div><div class="k">${k}</div></div>`).join("");
+    document.getElementById("risk-tbody").innerHTML = d.list.length ? d.list.map(r => `
+      <tr>
+        <td>${r.id}</td><td>${escapeHtml(r.username || "-")}</td>
+        <td>${RISK_RULES[r.rule] || escapeHtml(r.rule)}</td>
+        <td style="color:${RISK_LV_COLOR[r.level] || "inherit"}">${escapeHtml(r.level)}</td>
+        <td style="color:${r.status === "pending" ? "var(--gold)" : "var(--ok)"}">${r.status === "pending" ? "待处理" : "已处理"}</td>
+        <td>${escapeHtml(r.note || "")}</td>
+        <td class="mono">${fmtTime(r.created_at)}</td>
+        <td>${r.status === "pending" ? `<button class="mini-btn" onclick="reviewRisk(${r.id})">处理</button>` : ""}</td>
+      </tr>`).join("") : '<tr><td colspan="8">暂无风险事件</td></tr>';
+    document.getElementById("risk-summary").innerHTML = d.summary.length
+      ? `<table class="tbl"><thead><tr><th>用户</th><th>事件数</th><th>高危</th><th>中危</th><th>待处理</th></tr></thead><tbody>${d.summary.map(s => `
+          <tr><td>${escapeHtml(s.username)}</td><td class="num">${s.cnt}</td>
+          <td class="num" style="color:var(--bad)">${s.high}</td>
+          <td class="num" style="color:var(--gold)">${s.medium}</td>
+          <td class="num" style="color:${s.pending ? "var(--gold)" : "var(--ok)"}">${s.pending}</td></tr>`).join("")}</tbody></table>`
+      : '<p style="color:var(--muted)">暂无数据</p>';
+  } catch (e) { toast(e.message, "err"); }
+}
+function reviewRisk(id) {
+  const note = prompt("处理备注：", "") || "";
+  Api.riskReview(id, note).then(() => { toast("已标记处理", "ok"); loadRisks(); }).catch(e => toast(e.message, "err"));
+}
+
+const REP_STATUS = { pending: ["待处理", "var(--gold)"], handled: ["已处理", "var(--ok)"], rejected: ["已驳回", "var(--muted)"] };
+
+async function loadReports() {
+  try {
+    const d = await Api.adminReportList(document.getElementById("rep-status").value);
+    document.getElementById("rep-tbody").innerHTML = d.list.length ? d.list.map(r => `
+      <tr>
+        <td>${r.id}</td>
+        <td>${r.content_type === "bottle" ? "🍾漂流瓶" : "📬站内信"}${r.hidden ? ' <span style="color:var(--bad)">(已隐藏)</span>' : ""}</td>
+        <td style="max-width:240px;word-break:break-all">${escapeHtml((r.content || "").slice(0, 80))}</td>
+        <td>${escapeHtml(r.reporter_name || "-")}</td>
+        <td>${escapeHtml(r.reason || "")}</td>
+        <td style="color:${(REP_STATUS[r.status] || [r.status, ""])[1]}">${(REP_STATUS[r.status] || [r.status, ""])[0]}</td>
+        <td>${escapeHtml(r.handled_by || "-")}</td>
+        <td class="mono">${fmtTime(r.created_at)}</td>
+        <td style="white-space:nowrap">
+          ${r.status === "pending" ? `
+            <button class="mini-btn" onclick="handleReport(${r.id}, 'hide')">隐藏</button>
+            <button class="mini-btn" onclick="handleReport(${r.id}, 'warn')">警告</button>
+            <button class="mini-btn" onclick="handleReport(${r.id}, 'reject')">驳回</button>` : ""}
+        </td>
+      </tr>`).join("") : '<tr><td colspan="9">暂无举报</td></tr>';
+  } catch (e) { toast(e.message, "err"); }
+}
+function handleReport(id, action) {
+  const actions = { hide: "隐藏内容（不再公开展示）", warn: "警告内容作者", reject: "驳回举报" };
+  if (!confirm(`确认${actions[action]}？`)) return;
+  const note = prompt("处理备注（可选）：", "") || "";
+  Api.adminReportHandle(id, action, note)
+    .then(() => { toast("已处理", "ok"); loadReports(); loadBottles(); })
+    .catch(e => toast(e.message, "err"));
+}
+
 (async () => {
   try {
     const { user } = await Api.me();
     if (user.role !== "admin") { toast("无权限访问", "err"); location.href = "/"; return; }
   } catch (e) { toast("请先登录", "err"); location.href = "/"; return; }
   loadStats(); loadDashboard(); loadEconomy(); loadConfigs(); loadUsers(); loadLogs(); loadBottles();
+  loadRisks(); loadReports();
 })();
 </script>
 </body>
