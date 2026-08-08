@@ -109,7 +109,9 @@ a { color: var(--accent2); text-decoration: none; }
   border: 1px solid var(--line); border-radius: 16px; padding: 22px;
   transition: transform .15s, box-shadow .15s, border-color .15s;
   display: flex; flex-direction: column; gap: 10px; cursor: pointer;
+  text-decoration: none; color: inherit;   /* #26 语义化链接 */
 }
+a.game-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .game-card:hover { transform: translateY(-4px); border-color: var(--accent); box-shadow: 0 12px 30px rgba(124,92,255,.25); }
 .game-icon { font-size: 46px; }
 .game-card h3 { font-size: 20px; }
@@ -119,6 +121,16 @@ a { color: var(--accent2); text-decoration: none; }
 .new-tag {
   font-size: 11px; vertical-align: middle; background: linear-gradient(135deg, var(--accent), var(--accent2));
   color: #fff; border-radius: 8px; padding: 2px 8px; font-weight: 700;
+}
+
+/* #26 无障碍:键盘焦点可见 + 减少动画 */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 .panel {
