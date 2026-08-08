@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request
 from . import config
 from .auth import get_user_by_name, is_vip, me, user_level
 from .db import _lock, db
+from .gameconfig import config_get
 from .http import json_response, parse_body
 from .wallet import (add_daily_earned, change_points, daily_earned, log, rate_check,
                      _rate_peek)
@@ -444,11 +445,12 @@ async def farm_sell(request: Request):
         sh = building_level(conn, user["id"], "storehouse")
         unit = farm_sell_value(crop, sh)
         earned = inv["count"] * unit
-        remain = config.DAILY_EARNED_CAP - daily_earned(user["username"], today)
+        daily_cap = config_get("daily_earned_cap", config.DAILY_EARNED_CAP)
+        remain = daily_cap - daily_earned(user["username"], today)
         if earned > remain:
             sell_count = remain // unit
             if sell_count <= 0:
-                return json_response(400, {"error": f"今日可赚积分已达上限（{config.DAILY_EARNED_CAP}）"})
+                return json_response(400, {"error": f"今日可赚积分已达上限（{daily_cap}）"})
             conn.execute("UPDATE inventory SET count=count-? WHERE user_id=? AND crop=?",
                          (sell_count, user["id"], crop))
             earned = sell_count * unit
@@ -622,7 +624,7 @@ async def farm_steal(request: Request):
             return json_response(400, {"error": "对方作物还没成熟"})
         sh = building_level(conn, target["id"], "storehouse")
         reward = max(1, round(farm_sell_value(row["crop"], sh) * STEAL_RATE))
-        remain = config.DAILY_EARNED_CAP - daily_earned(user["username"], today)
+        remain = config_get("daily_earned_cap", config.DAILY_EARNED_CAP) - daily_earned(user["username"], today)
         if reward > remain:
             return json_response(400, {"error": "今日积分已达上限，明天再来偷吧"})
         conn.execute("UPDATE farm SET stolen=1, stolen_by=? WHERE user_id=? AND slot=?",

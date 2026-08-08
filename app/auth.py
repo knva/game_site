@@ -15,6 +15,7 @@ from fastapi import APIRouter, Request
 
 from . import config
 from .db import _lock, db
+from .gameconfig import config_get
 from .http import (clear_session_cookie, cookie_token, json_response, parse_body,
                    set_session_cookie)
 from .wallet import change_points, daily_earned, log, rate_check
@@ -129,7 +130,7 @@ def api_me(request: Request):
                              "vip_until": user["vip_until"], "vip": is_vip(user),
                              "vip_days_left": vip_remaining_days(user)},
                              "unread": unread, "today_earned": earned,
-                             "daily_cap": config.DAILY_EARNED_CAP})
+                             "daily_cap": config_get("daily_earned_cap", config.DAILY_EARNED_CAP)})
 
 
 @router.get("/api/checkin/status")
@@ -265,7 +266,7 @@ async def checkin(request: Request):
         streak = compute_streak(conn, user["id"])
         reward = checkin_reward(streak + 1, is_vip(user))
         today_str = time.strftime("%Y-%m-%d")
-        if daily_earned(user["username"], today_str) + reward > config.DAILY_EARNED_CAP:
+        if daily_earned(user["username"], today_str) + reward > config_get("daily_earned_cap", config.DAILY_EARNED_CAP):
             return json_response(400, {"error": "今日积分已达上限"})
         conn.execute("INSERT INTO checkins(user_id,day,reward,make_up,at) VALUES(?,?,?,0,?)",
                      (user["id"], today, reward, time.time()))

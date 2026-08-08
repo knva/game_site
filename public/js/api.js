@@ -82,6 +82,11 @@ const Api = {
 
   adminStats: () => Api.get("/api/admin/stats"),
   adminDashboard: () => Api.get("/api/admin/dashboard"),
+  adminEconomy: () => Api.get("/api/admin/economy"),
+  configList: () => Api.get("/api/admin/config/list"),
+  configSet: (name, value) => Api.post("/api/admin/config/set", { name, value }),
+  configPublish: (name) => Api.post("/api/admin/config/publish", { name }),
+  configRollback: (name) => Api.post("/api/admin/config/rollback", { name }),
   adminUserDetail: (name) => Api.get(`/api/admin/user-detail?name=${encodeURIComponent(name)}`),
   adminKickSession: (user_id, name) => Api.post("/api/admin/kick-session", { user_id, name }),
   adminUsers: (search, page) => Api.get(`/api/admin/users?search=${encodeURIComponent(search)}&page=${page}`),

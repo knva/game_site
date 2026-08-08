@@ -22,6 +22,7 @@ from starlette.responses import StreamingResponse
 from . import config
 from .auth import me
 from .db import _lock, db
+from .gameconfig import config_get
 from .http import json_response, parse_body
 from .wallet import (add_daily_earned, add_slot_daily_earned, change_points, daily_earned,
                      log, rate_check, slot_daily_earned)
@@ -550,7 +551,8 @@ def slot_spin(conn, uid, username, ip):
         pay = SLOT_SYMBOLS[mid]["x3"]
     elif reel[0] == mid or reel[2] == mid:
         pay = SLOT_PAIR_PAY
-    change_points(conn, uid, username, -SLOT_COST, "slot_spin", f"拉杆 {'中奖'+str(pay) if pay else '未中奖'}", ip)
+    change_points(conn, uid, username, -config_get("slot_cost", SLOT_COST),
+                  "slot_spin", f"拉杆 {'中奖'+str(pay) if pay else '未中奖'}", ip)
     token = None
     if pay > 0:
         token = secrets.token_hex(16)
@@ -667,10 +669,11 @@ async def game_start(request: Request):
                 (user["id"], day_start)).fetchone()["c"]
         if played >= GOLDMINER_DAILY_LIMIT:
             return json_response(429, {"error": f"黄金矿工每天限玩 {GOLDMINER_DAILY_LIMIT} 次，明天再来！"})
-        if user["points"] < GOLDMINER_TICKET:
-            return json_response(400, {"error": f"门票需要 {GOLDMINER_TICKET} 积分"})
+        ticket = config_get("goldminer_ticket", GOLDMINER_TICKET)
+        if user["points"] < ticket:
+            return json_response(400, {"error": f"门票需要 {ticket} 积分"})
         with _lock, db() as conn:
-            change_points(conn, user["id"], user["username"], -GOLDMINER_TICKET,
+            change_points(conn, user["id"], user["username"], -ticket,
                           "goldminer_ticket", f"购买门票（第{played + 1}/{GOLDMINER_DAILY_LIMIT}次）", ip)
     seed = secrets.randbits(31)
     max_score = GAMES[game]["max_score"]
@@ -693,10 +696,10 @@ async def game_start(request: Request):
                                "chart": chart, "max_score": max_score,
                                "goldminer_seed": seed if game == "goldminer" else None,
                                "duration": GAMES[game]["duration"],
-                               "ticket": GOLDMINER_TICKET if game == "goldminer" else 0,
+                               "ticket": ticket if game == "goldminer" else 0,
                                "daily_left": played if game == "goldminer" else None,
                                "limits": {"hour": config.SUBMIT_PER_HOUR, "day": config.SUBMIT_PER_DAY,
-                                          "daily_cap": config.DAILY_EARNED_CAP}})
+                                          "daily_cap": config_get("daily_earned_cap", config.DAILY_EARNED_CAP)}})
 
 
 @router.post("/api/game/end")
@@ -777,9 +780,11 @@ async def game_end(request: Request):
                 total_v += v
             if score != total_v:
                 return json_response(400, {"error": "分数与抓取记录不符"})
-            earned = random.randint(GOLDMINER_PAY_MIN, GOLDMINER_PAY_MAX)
-        if daily_earned(user["username"], today) + earned > config.DAILY_EARNED_CAP:
-            return json_response(400, {"error": f"今日可赚积分已达上限（{config.DAILY_EARNED_CAP}）"})
+            earned = random.randint(config_get("goldminer_pay_min", GOLDMINER_PAY_MIN),
+                                    config_get("goldminer_pay_max", GOLDMINER_PAY_MAX))
+        daily_cap = config_get("daily_earned_cap", config.DAILY_EARNED_CAP)
+        if daily_earned(user["username"], today) + earned > daily_cap:
+            return json_response(400, {"error": f"今日可赚积分已达上限（{daily_cap}）"})
         conn.execute("UPDATE game_sessions SET used=1 WHERE token=?", (token,))
         conn.execute("UPDATE users SET exp=exp+? WHERE id=?", (max(1, earned // 20), user["id"]))  # 结算经验
         points = change_points(conn, user["id"], user["username"], earned,
@@ -797,8 +802,10 @@ async def game_end(request: Request):
         log(conn, user["id"], user["username"], "game_end", f"结算 {GAMES[game]['name']}", earned, ip)
     return json_response(200, {"ok": True, "earned": earned, "points": points,
                                "is_best": is_best, "today_earned": daily_earned(user["username"], today),
-                               "ticket": GOLDMINER_TICKET if game == "goldminer" else 0,
-                               "pay_range": [GOLDMINER_PAY_MIN, GOLDMINER_PAY_MAX] if game == "goldminer" else None})
+                               "ticket": config_get("goldminer_ticket", GOLDMINER_TICKET) if game == "goldminer" else 0,
+                               "pay_range": [config_get("goldminer_pay_min", GOLDMINER_PAY_MIN),
+                                             config_get("goldminer_pay_max", GOLDMINER_PAY_MAX)]
+                               if game == "goldminer" else None})
 
 
 @router.post("/api/wheel/spin")
@@ -832,7 +839,8 @@ async def wheel_spin(request: Request):
                 "UPDATE wheel_free_tickets SET used=1 WHERE ticket_id=? AND used=0",
                 (ticket["ticket_id"],))
             used_free = cur.rowcount > 0
-        if not used_free and user["points"] < WHEEL_COST:
+        wheel_cost = config_get("wheel_cost", WHEEL_COST)
+        if not used_free and user["points"] < wheel_cost:
             return json_response(400, {"error": "积分不足"})
         idx = random.choices(range(len(WHEEL_SECTORS)), weights=WHEEL_WEIGHTS, k=1)[0]
         sector = WHEEL_SECTORS[idx]
@@ -842,10 +850,10 @@ async def wheel_spin(request: Request):
             points = conn.execute("SELECT points FROM users WHERE id=?",
                                   (user["id"],)).fetchone()["points"]
         elif free:
-            points = change_points(conn, user["id"], user["username"], -WHEEL_COST,
+            points = change_points(conn, user["id"], user["username"], -wheel_cost,
                                    "wheel_spin", "转盘：再转一次", ip)
         else:
-            points = change_points(conn, user["id"], user["username"], prize - WHEEL_COST,
+            points = change_points(conn, user["id"], user["username"], prize - wheel_cost,
                                    "wheel_spin", f"转盘：{sector['name']}", ip)
         if free:
             # 抽中“再转一次”发放一次性免费券(24 小时有效)
@@ -887,13 +895,14 @@ async def slot_spin_route(request: Request):
         today = time.strftime("%Y-%m-%d")
         if slot_daily_earned(user["username"], today) >= SLOT_DAILY_MAX:
             return json_response(400, {"error": f"今日老虎机收益已达上限（{SLOT_DAILY_MAX} 金币），明天再来！"})
-        if user["points"] < SLOT_COST:
-            return json_response(400, {"error": f"积分不足，每次需要 {SLOT_COST} 积分"})
+        slot_cost = config_get("slot_cost", SLOT_COST)
+        if user["points"] < slot_cost:
+            return json_response(400, {"error": f"积分不足，每次需要 {slot_cost} 积分"})
         reel, pay, token = slot_spin(conn, user["id"], user["username"], ip)
         points = conn.execute("SELECT points FROM users WHERE id=?", (user["id"],)).fetchone()["points"]
-    return json_response(200, {"ok": True, "reel": reel, "pay": pay, "cost": SLOT_COST,
+    return json_response(200, {"ok": True, "reel": reel, "pay": pay, "cost": slot_cost,
                                "points": points, "double_token": token,
-                               "can_double": bool(token and pay > SLOT_COST),
+                               "can_double": bool(token and pay > slot_cost),
                                "daily_left": SLOT_DAILY_MAX - slot_daily_earned(user["username"], today),
                                "payouts": {s: SLOT_SYMBOLS[s]["x3"] for s in SLOT_SYMBOLS}})
 
