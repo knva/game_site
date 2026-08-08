@@ -112,6 +112,186 @@ def admin_stats(request: Request):
     return json_response(200, s)
 
 
+# ---------------- Issue #18:运营数据总览仪表盘 ----------------
+def _mask_ip(ip):
+    """隐私脱敏:IP 只显示前段(IPv4 显示前 2 段,IPv6 显示首个冒号分组)。"""
+    if not ip:
+        return ""
+    ip = str(ip)
+    if ":" in ip:  # IPv6
+        return ip.split(":")[0] + ":*"
+    parts = ip.split(".")
+    if len(parts) == 4:
+        return ".".join(parts[:2]) + ".*.*"
+    return ip[: len(ip) // 2] + "*"
+
+
+def _avg_score(conn, game):
+    r = conn.execute("SELECT AVG(score) s FROM scores WHERE game=?", (game,)).fetchone()
+    return round(r["s"], 1) if r["s"] is not None else None
+
+
+def _balance_dist(conn):
+    """余额分布:按档位统计用户数。"""
+    tiers = [("0~99", 0, 100), ("100~999", 100, 1000), ("1000~4999", 1000, 5000),
+             ("5000~9999", 5000, 10000), ("10000~49999", 10000, 50000), ("50000+", 50000, None)]
+    out = []
+    for label, lo, hi in tiers:
+        if hi is None:
+            c = conn.execute("SELECT COUNT(*) c FROM users WHERE points>=?", (lo,)).fetchone()["c"]
+        else:
+            c = conn.execute("SELECT COUNT(*) c FROM users WHERE points>=? AND points<?",
+                             (lo, hi)).fetchone()["c"]
+        out.append({"range": label, "users": c})
+    return out
+
+
+@router.get("/api/admin/dashboard")
+def admin_dashboard(request: Request):
+    """运营仪表盘:DAU / 新增 / 各游戏开局与完成率 / 积分经济 / 余额分布(按本地时区当日)。"""
+    user, err = _admin_or_403(request)
+    if err is not None:
+        return err
+    day_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    with _lock, db() as conn:
+        dau = conn.execute(
+            "SELECT COUNT(DISTINCT user_id) c FROM ("
+            " SELECT user_id FROM logs WHERE at>=? AND user_id IS NOT NULL"
+            " UNION"
+            " SELECT user_id FROM sessions WHERE created_at>=?"
+            ") t", (day_start, day_start)).fetchone()["c"]
+        new_users = conn.execute("SELECT COUNT(*) c FROM users WHERE created_at>=?",
+                                 (day_start,)).fetchone()["c"]
+        users_total = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
+        points_total = conn.execute("SELECT COALESCE(SUM(points),0) s FROM users").fetchone()["s"]
+
+        games = {}
+        for r in conn.execute(
+                "SELECT game, COUNT(*) starts, COALESCE(SUM(used),0) finishes "
+                "FROM game_sessions WHERE created_at>=? GROUP BY game", (day_start,)).fetchall():
+            games[r["game"]] = {"starts": r["starts"], "finishes": r["finishes"],
+                                "avg_score": _avg_score(conn, r["game"])}
+        # 非 game_sessions 游戏(转盘/老虎机/五子棋):开局从日志聚合,完成数按各自结果口径
+        for game, (start_action, finish_action) in {"slot": ("slot_spin", "slot_win"),
+                                                    "wheel": ("wheel_spin", "wheel_spin"),
+                                                    "gomoku": ("gomoku_create", None)}.items():
+            starts = conn.execute("SELECT COUNT(*) c FROM logs WHERE action=? AND at>=?",
+                                  (start_action, day_start)).fetchone()["c"]
+            if finish_action:
+                finishes = conn.execute("SELECT COUNT(*) c FROM logs WHERE action=? AND at>=?",
+                                        (finish_action, day_start)).fetchone()["c"]
+            else:
+                finishes = conn.execute("SELECT COUNT(*) c FROM gomoku_games WHERE at>=?",
+                                        (day_start,)).fetchone()["c"]
+            games[game] = {"starts": starts, "finishes": finishes,
+                           "avg_score": _avg_score(conn, game)}
+
+        produced = conn.execute(
+            "SELECT COALESCE(SUM(amount),0) s FROM point_ledger WHERE amount>0 AND created_at>=?",
+            (day_start,)).fetchone()["s"]
+        consumed = conn.execute(
+            "SELECT COALESCE(SUM(amount),0) s FROM point_ledger WHERE amount<0 AND created_at>=?",
+            (day_start,)).fetchone()["s"]
+        consumed = -consumed
+        pl_rows = conn.execute(
+            "SELECT business, COUNT(*) n, COALESCE(SUM(amount),0) s FROM point_ledger "
+            "WHERE created_at>=? GROUP BY business ORDER BY n DESC", (day_start,)).fetchall()
+        balance_dist = _balance_dist(conn)
+    return json_response(200, {
+        "dau": dau,
+        "new_users": new_users,
+        "games": games,
+        "economy": {
+            "produced": produced,
+            "consumed": consumed,
+            "net": produced - consumed,
+            "point_ledger": {
+                "today": sum(r["n"] for r in pl_rows),
+                "by_business": [{"business": r["business"], "count": r["n"], "amount": r["s"]}
+                                for r in pl_rows]},
+        },
+        "users_total": users_total,
+        "points_total": points_total,
+        "balance_dist": balance_dist,
+    })
+
+
+# ---------------- Issue #19:用户详情 / 封禁理由 / 会话管理 ----------------
+@router.get("/api/admin/user-detail")
+def admin_user_detail(request: Request):
+    """按用户名返回:基本资料 / 积分流水(最近50条) / 游戏记录 / 活跃会话 / 封禁历史。"""
+    user, err = _admin_or_403(request)
+    if err is not None:
+        return err
+    name = str(request.query_params.get("name", "")).strip()
+    if not name:
+        return json_response(400, {"error": "缺少用户名"})
+    with _lock, db() as conn:
+        target = get_user_by_name(conn, name)
+        if not target:
+            return json_response(400, {"error": "用户不存在"})
+        ledger = [dict(r) for r in conn.execute(
+            "SELECT id, business, amount, balance_after, detail, ip, created_at "
+            "FROM point_ledger WHERE user_id=? ORDER BY id DESC LIMIT 50",
+            (target["id"],)).fetchall()]
+        for r in ledger:
+            r["ip"] = _mask_ip(r["ip"])
+        scores = [dict(r) for r in conn.execute(
+            "SELECT game, score, at FROM scores WHERE user_id=? ORDER BY score DESC",
+            (target["id"],)).fetchall()]
+        sessions = [dict(r) for r in conn.execute(
+            "SELECT token, created_at, expires_at, ip FROM sessions "
+            "WHERE user_id=? AND expires_at>? ORDER BY created_at DESC",
+            (target["id"], time.time())).fetchall()]
+        for s in sessions:
+            s["ip"] = _mask_ip(s["ip"])
+        ban_history = [dict(r) for r in conn.execute(
+            "SELECT id, action, detail, at FROM logs "
+            "WHERE action='admin_op' AND detail LIKE '%封禁/解封 ' || ? || ' →%' "
+            "ORDER BY id DESC LIMIT 20", (name,)).fetchall()]
+        recent_logs = [dict(r) for r in conn.execute(
+            "SELECT id, action, detail, amount, at FROM logs WHERE username=? "
+            "ORDER BY id DESC LIMIT 30", (name,)).fetchall()]
+    return json_response(200, {
+        "user": {k: target[k] for k in ("id", "username", "points", "role", "status",
+                                        "created_at", "last_login", "vip_until", "exp", "steal_open")},
+        "ledger": ledger,
+        "scores": scores,
+        "sessions": sessions,
+        "ban_history": ban_history,
+        "recent_logs": recent_logs,
+    })
+
+
+@router.post("/api/admin/kick-session")
+async def admin_kick_session(request: Request):
+    """强制注销指定用户的全部会话。"""
+    data = await parse_body(request)
+    if data is None:
+        return json_response(400, {"error": "请求格式错误"})
+    ip = request.client.host if request.client else ""
+    user, err = _admin_or_403(request)
+    if err is not None:
+        return err
+    name = str(data.get("name", "")).strip()
+    try:
+        uid = int(data.get("user_id", 0))
+    except Exception:
+        uid = 0
+    with _lock, db() as conn:
+        target = get_user_by_name(conn, name) if name else None
+        if target is None and uid:
+            target = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        if not target:
+            return json_response(400, {"error": "用户不存在"})
+        cur = conn.execute("DELETE FROM sessions WHERE user_id=?", (target["id"],))
+        kicked = cur.rowcount
+        conn.commit()
+        log(conn, user["id"], user["username"], "admin_op",
+            f"强制下线 {target['username']}(注销 {kicked} 个会话)", ip=ip)
+    return json_response(200, {"ok": True, "kicked": kicked})
+
+
 @router.post("/api/admin/set-balance")
 async def admin_set_balance(request: Request):
     data = await parse_body(request)
@@ -152,6 +332,7 @@ async def admin_toggle_status(request: Request):
         uid = int(data.get("user_id", 0))
     except Exception:
         return json_response(400, {"error": "参数错误"})
+    reason = str(data.get("reason", "")).strip()[:100]
     with _lock, db() as conn:
         target = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
         if not target:
@@ -162,8 +343,10 @@ async def admin_toggle_status(request: Request):
         conn.execute("UPDATE users SET status=? WHERE id=?", (new, uid))
         conn.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
         conn.commit()
-        log(conn, user["id"], user["username"], "admin_op",
-            f"封禁/解封 {target['username']} → {new}", ip=ip)
+        detail = f"封禁/解封 {target['username']} → {new}"
+        if reason:
+            detail += f"，理由：{reason}"
+        log(conn, user["id"], user["username"], "admin_op", detail, ip=ip)
     return json_response(200, {"ok": True, "status": new})
 
 

@@ -7,9 +7,25 @@
 <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
+<style>
+  .dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 14px; }
+  .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 12px; }
+  .dash-col h4 { margin: 12px 0 6px; color: var(--muted); font-size: 13px; }
+  .dash-col h4:first-child { margin-top: 0; }
+  .dash-col p { margin: 4px 0; font-size: 13px; line-height: 1.7; word-break: break-all; }
+  .dash-col p b { color: var(--gold); }
+  @media (max-width: 860px) { .dash-grid, .detail-grid { grid-template-columns: 1fr; } }
+  #d-panel .toolbar span { white-space: nowrap; }
+</style>
 <div class="game-wrap">
   <div class="game-panel">
-    <h2>📊 平台统计</h2>
+    <h2>📊 运营仪表盘 <span class="sub">今日 · 本地时区</span></h2>
+    <div class="stat-cards" id="dash-cards"></div>
+    <div id="dash-detail" class="dash-grid"></div>
+  </div>
+
+  <div class="game-panel">
+    <h2>📈 平台统计</h2>
     <div class="stat-cards" id="stat-cards"></div>
   </div>
 
@@ -23,6 +39,15 @@
       <tr><th>ID</th><th>昵称</th><th>余额</th><th>角色</th><th>状态</th><th>注册时间</th><th>操作</th></tr>
     </thead><tbody id="u-tbody"></tbody></table>
     <div class="pager" id="u-pager"></div>
+  </div>
+
+  <div class="game-panel">
+    <h2>🔍 用户详情 <span class="sub">查看资料/积分流水/游戏记录/会话/封禁历史</span></h2>
+    <div class="toolbar">
+      <input id="d-search" placeholder="输入用户名" style="flex:1">
+      <button class="btn mini" onclick="loadDetail()">查询</button>
+    </div>
+    <div id="d-panel"></div>
   </div>
 
   <div class="game-panel">
@@ -103,6 +128,36 @@ async function loadStats() {
   } catch (e) { toast(e.message, "err"); }
 }
 
+async function loadDashboard() {
+  try {
+    const d = await Api.adminDashboard();
+    const starts = Object.values(d.games).reduce((a, g) => a + g.starts, 0);
+    document.getElementById("dash-cards").innerHTML = [
+      ["👥", d.dau, "今日活跃 DAU"], ["🆕", d.new_users, "今日新增"],
+      ["🎮", starts, "今日开局"], ["💎", d.economy.net, "今日积分净增"],
+    ].map(([e, v, k]) => `<div class="stat-card"><div class="v">${e} ${v}</div><div class="k">${k}</div></div>`).join("");
+    const gameRows = Object.entries(d.games).map(([g, m]) => `
+      <tr><td>${escapeHtml(g)}</td><td class="num">${m.starts}</td><td class="num">${m.finishes}</td>
+      <td class="num">${m.avg_score == null ? "-" : m.avg_score}</td></tr>`).join("");
+    const eco = d.economy;
+    const biz = eco.point_ledger.by_business
+      .map(b => `${escapeHtml(b.business)}×${b.count}(${b.amount})`).join("、");
+    document.getElementById("dash-detail").innerHTML = `
+      <div class="dash-col">
+        <h4>🎮 各游戏今日</h4>
+        <table class="tbl"><thead><tr><th>游戏</th><th>开局</th><th>完成</th><th>平均分</th></tr></thead>
+        <tbody>${gameRows || '<tr><td colspan="4">今日暂无游戏数据</td></tr>'}</tbody></table>
+      </div>
+      <div class="dash-col">
+        <h4>💎 积分经济</h4>
+        <p>产出 <b>${eco.produced}</b> · 消耗 <b>${eco.consumed}</b> · 净增 <b>${eco.net}</b></p>
+        <p>今日流水 <b>${eco.point_ledger.today}</b> 笔${biz ? `：${biz}` : ""}</p>
+        <h4>⚖️ 余额分布 <span class="sub">用户 ${d.users_total} · 总积分 ${d.points_total}</span></h4>
+        <p>${d.balance_dist.map(b => `${escapeHtml(b.range)}: ${b.users}人`).join(" · ")}</p>
+      </div>`;
+  } catch (e) { toast(e.message, "err"); }
+}
+
 let upage = 1;
 async function loadUsers() {
   try {
@@ -115,8 +170,9 @@ async function loadUsers() {
         <td style="color:${u.status === "active" ? "var(--ok)" : "var(--bad)"}">${u.status === "active" ? "正常" : "封禁"}</td>
         <td class="mono">${fmtTime(u.created_at)}</td>
         <td style="white-space:nowrap">
+          <button class="mini-btn" onclick="loadDetail('${escapeHtml(u.username)}')">详情</button>
           <button class="mini-btn" onclick="setBalance(${u.id}, '${escapeHtml(u.username)}')">调余额</button>
-          <button class="mini-btn" onclick="toggleUser(${u.id})">${u.status === "active" ? "封禁" : "解封"}</button>
+          <button class="mini-btn" onclick="toggleUserWithReason(${u.id}, '${escapeHtml(u.username)}', '${u.status}')">${u.status === "active" ? "封禁" : "解封"}</button>
         </td>
       </tr>`).join("");
     document.getElementById("u-pager").innerHTML =
@@ -134,10 +190,69 @@ function setBalance(uid, name) {
     .then(() => { toast("调整成功", "ok"); loadUsers(); })
     .catch(e => toast(e.message, "err"));
 }
-function toggleUser(uid) {
-  Api.adminToggle(uid)
-    .then(() => { toast("已操作", "ok"); loadUsers(); })
+function toggleUserWithReason(uid, name, status) {
+  const act = status === "active" ? "封禁" : "解封";
+  if (!confirm(`确认${act} ${name}？${status === "active" ? "封禁后其全部会话将被注销。" : ""}`)) return;
+  const reason = prompt(`${act}理由/备注（可选）：`, "") || "";
+  Api.adminToggle(uid, reason)
+    .then(() => { toast(`${act}成功${reason ? "（已记录理由）" : ""}`, "ok"); loadUsers(); loadDashboard(); })
     .catch(e => toast(e.message, "err"));
+}
+
+function kickSessions(uid, name) {
+  if (!confirm(`确认强制下线 ${name} 的全部会话？`)) return;
+  Api.adminKickSession(uid, name)
+    .then(d => { toast(`已注销 ${d.kicked} 个会话`, "ok"); loadDetail(name); })
+    .catch(e => toast(e.message, "err"));
+}
+
+async function loadDetail(name) {
+  const n = (name || document.getElementById("d-search").value.trim());
+  if (!n) return;
+  try {
+    const d = await Api.adminUserDetail(n);
+    const u = d.user;
+    const active = u.status === "active";
+    const lv = Math.floor(Math.sqrt(Math.max(0, u.exp || 0) / 100)) + 1;
+    const vip = u.vip_until && u.vip_until > Date.now() / 1000;
+    document.getElementById("d-search").value = u.username;
+    document.getElementById("d-panel").innerHTML = `
+      <div class="toolbar" style="margin-bottom:8px">
+        <span><b>${escapeHtml(u.username)}</b>（ID ${u.id}）</span>
+        <span>余额 <b class="num">${u.points}</b></span>
+        <span>角色 ${u.role === "admin" ? "👑管理员" : "玩家"}</span>
+        <span style="color:${active ? "var(--ok)" : "var(--bad)"}">${active ? "正常" : "封禁"}</span>
+        <span>注册 ${fmtTime(u.created_at)}</span>
+        <span>最近登录 ${u.last_login ? fmtTime(u.last_login) : "—"}</span>
+        <span>${vip ? "👑 VIP" : "非VIP"}</span>
+        <span>Lv.${lv}</span>
+        <button class="mini-btn" onclick="setBalance(${u.id}, '${escapeHtml(u.username)}')">调余额</button>
+        <button class="mini-btn" onclick="toggleUserWithReason(${u.id}, '${escapeHtml(u.username)}', '${u.status}')">${active ? "封禁" : "解封"}</button>
+        <button class="mini-btn" onclick="kickSessions(${u.id}, '${escapeHtml(u.username)}')">强制下线</button>
+      </div>
+      <div class="detail-grid">
+        <div class="dash-col">
+          <h4>💳 积分流水（最近50条）</h4>
+          <table class="tbl"><thead><tr><th>时间</th><th>业务</th><th>金额</th><th>余额</th><th>备注</th><th>IP</th></tr></thead>
+          <tbody>${d.ledger.map(r => `<tr><td class="mono">${fmtTime(r.created_at)}</td>
+            <td>${escapeHtml(r.business)}</td><td class="num">${r.amount}</td>
+            <td class="num">${r.balance_after}</td><td>${escapeHtml(r.detail || "")}</td>
+            <td class="mono">${escapeHtml(r.ip || "")}</td></tr>`).join("") || '<tr><td colspan="6">暂无流水</td></tr>'}</tbody></table>
+        </div>
+        <div class="dash-col">
+          <h4>🎮 游戏记录</h4>
+          <table class="tbl"><thead><tr><th>游戏</th><th>最高分</th><th>时间</th></tr></thead>
+          <tbody>${d.scores.map(r => `<tr><td>${escapeHtml(r.game)}</td><td class="num">${r.score}</td>
+            <td class="mono">${fmtTime(r.at)}</td></tr>`).join("") || '<tr><td colspan="3">暂无记录</td></tr>'}</tbody></table>
+          <h4>🔌 活跃会话（${d.sessions.length}）</h4>
+          <table class="tbl"><thead><tr><th>登录</th><th>到期</th><th>IP</th></tr></thead>
+          <tbody>${d.sessions.map(r => `<tr><td class="mono">${fmtTime(r.created_at)}</td>
+            <td class="mono">${fmtTime(r.expires_at)}</td><td class="mono">${escapeHtml(r.ip || "")}</td></tr>`).join("") || '<tr><td colspan="3">无活跃会话</td></tr>'}</tbody></table>
+          <h4>🚫 封禁历史</h4>
+          <ul class="bottle-feed">${d.ban_history.map(r => `<li class="bottle-item">${fmtTime(r.at)} ${escapeHtml(r.detail || "")}</li>`).join("") || '<li class="bottle-item">无封禁记录</li>'}</ul>
+        </div>
+      </div>`;
+  } catch (e) { toast(e.message, "err"); }
 }
 
 document.getElementById("a-send").onclick = () => {
@@ -192,7 +307,7 @@ function delBottle(id) {
     const { user } = await Api.me();
     if (user.role !== "admin") { toast("无权限访问", "err"); location.href = "/"; return; }
   } catch (e) { toast("请先登录", "err"); location.href = "/"; return; }
-  loadStats(); loadUsers(); loadLogs(); loadBottles();
+  loadStats(); loadDashboard(); loadUsers(); loadLogs(); loadBottles();
 })();
 </script>
 </body>

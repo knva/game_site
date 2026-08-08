@@ -539,6 +539,40 @@ def log(conn, user_id, username, action, detail="", amount=None, ip=""):
     conn.commit()
 
 
+# ---------------- 后台辅助(#18/#19:仪表盘/用户详情脱敏) ----------------
+def _mask_ip(ip):
+    """隐私脱敏:IP 只显示前段(IPv4 前 2 段,IPv6 首个分组)"""
+    if not ip:
+        return ""
+    ip = str(ip)
+    if ":" in ip:
+        return ip.split(":")[0] + ":*"
+    parts = ip.split(".")
+    if len(parts) == 4:
+        return ".".join(parts[:2]) + ".*.*"
+    return ip[: len(ip) // 2] + "*"
+
+
+def _avg_score(conn, game):
+    r = conn.execute("SELECT AVG(score) s FROM scores WHERE game=?", (game,)).fetchone()
+    return round(r["s"], 1) if r["s"] is not None else None
+
+
+def _balance_dist(conn):
+    """余额分布:按档位统计用户数"""
+    tiers = [("0~99", 0, 100), ("100~999", 100, 1000), ("1000~4999", 1000, 5000),
+             ("5000~9999", 5000, 10000), ("10000~49999", 10000, 50000), ("50000+", 50000, None)]
+    out = []
+    for label, lo, hi in tiers:
+        if hi is None:
+            c = conn.execute("SELECT COUNT(*) c FROM users WHERE points>=?", (lo,)).fetchone()["c"]
+        else:
+            c = conn.execute("SELECT COUNT(*) c FROM users WHERE points>=? AND points<?",
+                             (lo, hi)).fetchone()["c"]
+        out.append({"range": label, "users": c})
+    return out
+
+
 # ---------------- 频率限制(持久化存储,重启不清零,多实例共享) ----------------
 def rate_check(key, limit, window, now=None):
     """窗口限流:DB 持久化。窗口过期自动重置,计数原子递增。"""
@@ -1451,6 +1485,97 @@ class Handler(BaseHTTPRequestHandler):
                     f"""SELECT * FROM logs WHERE {' AND '.join(cond)}
                         ORDER BY id DESC LIMIT 50 OFFSET ?""", args + [(page - 1) * 50]).fetchall()
             return self._send(200, {"list": [dict(r) for r in rows], "total": total, "page": page})
+
+        if path == "/api/admin/dashboard":
+            user = self._me(admin=True)
+            if user is None or user is False:
+                return self._send(403, {"error": "无权限"})
+            day_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+            with _lock, db() as conn:
+                dau = conn.execute(
+                    "SELECT COUNT(DISTINCT user_id) c FROM ("
+                    " SELECT user_id FROM logs WHERE at>=? AND user_id IS NOT NULL"
+                    " UNION SELECT user_id FROM sessions WHERE created_at>=?) t",
+                    (day_start, day_start)).fetchone()["c"]
+                new_users = conn.execute("SELECT COUNT(*) c FROM users WHERE created_at>=?",
+                                         (day_start,)).fetchone()["c"]
+                users_total = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
+                points_total = conn.execute("SELECT COALESCE(SUM(points),0) s FROM users").fetchone()["s"]
+                games = {}
+                for r in conn.execute(
+                        "SELECT game, COUNT(*) starts, COALESCE(SUM(used),0) finishes "
+                        "FROM game_sessions WHERE created_at>=? GROUP BY game", (day_start,)).fetchall():
+                    games[r["game"]] = {"starts": r["starts"], "finishes": r["finishes"],
+                                        "avg_score": _avg_score(conn, r["game"])}
+                for game, (sa, fa) in {"slot": ("slot_spin", "slot_win"),
+                                       "wheel": ("wheel_spin", "wheel_spin"),
+                                       "gomoku": ("gomoku_create", None)}.items():
+                    starts = conn.execute("SELECT COUNT(*) c FROM logs WHERE action=? AND at>=?",
+                                          (sa, day_start)).fetchone()["c"]
+                    if fa:
+                        finishes = conn.execute("SELECT COUNT(*) c FROM logs WHERE action=? AND at>=?",
+                                                (fa, day_start)).fetchone()["c"]
+                    else:
+                        finishes = conn.execute("SELECT COUNT(*) c FROM gomoku_games WHERE at>=?",
+                                                (day_start,)).fetchone()["c"]
+                    games[game] = {"starts": starts, "finishes": finishes, "avg_score": _avg_score(conn, game)}
+                produced = conn.execute(
+                    "SELECT COALESCE(SUM(amount),0) s FROM point_ledger WHERE amount>0 AND created_at>=?",
+                    (day_start,)).fetchone()["s"]
+                consumed = -conn.execute(
+                    "SELECT COALESCE(SUM(amount),0) s FROM point_ledger WHERE amount<0 AND created_at>=?",
+                    (day_start,)).fetchone()["s"]
+                pl_rows = conn.execute(
+                    "SELECT business, COUNT(*) n, COALESCE(SUM(amount),0) s FROM point_ledger "
+                    "WHERE created_at>=? GROUP BY business ORDER BY n DESC", (day_start,)).fetchall()
+                balance_dist = _balance_dist(conn)
+            return self._send(200, {
+                "dau": dau, "new_users": new_users, "games": games,
+                "economy": {"produced": produced, "consumed": consumed, "net": produced - consumed,
+                            "point_ledger": {"today": sum(r["n"] for r in pl_rows),
+                                             "by_business": [{"business": r["business"], "count": r["n"],
+                                                              "amount": r["s"]} for r in pl_rows]}},
+                "users_total": users_total, "points_total": points_total,
+                "balance_dist": balance_dist})
+
+        if path == "/api/admin/user-detail":
+            user = self._me(admin=True)
+            if user is None or user is False:
+                return self._send(403, {"error": "无权限"})
+            name = (q.get("name") or [""])[0].strip()
+            if not name:
+                return self._send(400, {"error": "缺少用户名"})
+            with _lock, db() as conn:
+                target = get_user_by_name(conn, name)
+                if not target:
+                    return self._send(400, {"error": "用户不存在"})
+                ledger = [dict(r) for r in conn.execute(
+                    "SELECT id, business, amount, balance_after, detail, ip, created_at "
+                    "FROM point_ledger WHERE user_id=? ORDER BY id DESC LIMIT 50",
+                    (target["id"],)).fetchall()]
+                for r in ledger:
+                    r["ip"] = _mask_ip(r["ip"])
+                scores = [dict(r) for r in conn.execute(
+                    "SELECT game, score, at FROM scores WHERE user_id=? ORDER BY score DESC",
+                    (target["id"],)).fetchall()]
+                sessions = [dict(r) for r in conn.execute(
+                    "SELECT token, created_at, expires_at, ip FROM sessions "
+                    "WHERE user_id=? AND expires_at>? ORDER BY created_at DESC",
+                    (target["id"], time.time())).fetchall()]
+                for s in sessions:
+                    s["ip"] = _mask_ip(s["ip"])
+                ban_history = [dict(r) for r in conn.execute(
+                    "SELECT id, action, detail, at FROM logs "
+                    "WHERE action='admin_op' AND detail LIKE '%封禁/解封 ' || ? || ' →%' "
+                    "ORDER BY id DESC LIMIT 20", (name,)).fetchall()]
+                recent_logs = [dict(r) for r in conn.execute(
+                    "SELECT id, action, detail, amount, at FROM logs WHERE username=? "
+                    "ORDER BY id DESC LIMIT 30", (name,)).fetchall()]
+            return self._send(200, {
+                "user": {k: target[k] for k in ("id", "username", "points", "role", "status",
+                                                "created_at", "last_login", "vip_until", "exp", "steal_open")},
+                "ledger": ledger, "scores": scores, "sessions": sessions,
+                "ban_history": ban_history, "recent_logs": recent_logs})
 
         if path == "/api/admin/bottles":
             user = self._me(admin=True)
@@ -2566,6 +2691,7 @@ class Handler(BaseHTTPRequestHandler):
                 uid = int(data.get("user_id", 0))
             except Exception:
                 return self._send(400, {"error": "参数错误"})
+            reason = str(data.get("reason", "")).strip()[:100]
             with _lock, db() as conn:
                 target = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
                 if not target:
@@ -2576,9 +2702,33 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("UPDATE users SET status=? WHERE id=?", (new, uid))
                 conn.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
                 conn.commit()
-                log(conn, user["id"], user["username"], "admin_op",
-                    f"封禁/解封 {target['username']} → {new}", ip=ip)
+                detail = f"封禁/解封 {target['username']} → {new}"
+                if reason:
+                    detail += f"，理由：{reason}"
+                log(conn, user["id"], user["username"], "admin_op", detail, ip=ip)
             return self._send(200, {"ok": True, "status": new})
+
+        if path == "/api/admin/kick-session":
+            user = self._me(admin=True)
+            if user is None or user is False:
+                return self._send(403, {"error": "无权限"})
+            name = str(data.get("name", "")).strip()
+            try:
+                uid = int(data.get("user_id", 0))
+            except Exception:
+                uid = 0
+            with _lock, db() as conn:
+                target = get_user_by_name(conn, name) if name else None
+                if target is None and uid:
+                    target = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+                if not target:
+                    return self._send(400, {"error": "用户不存在"})
+                cur = conn.execute("DELETE FROM sessions WHERE user_id=?", (target["id"],))
+                kicked = cur.rowcount
+                conn.commit()
+                log(conn, user["id"], user["username"], "admin_op",
+                    f"强制下线 {target['username']}(注销 {kicked} 个会话)", ip=ip)
+            return self._send(200, {"ok": True, "kicked": kicked})
 
         if path == "/api/admin/mail":
             user = self._me(admin=True)
