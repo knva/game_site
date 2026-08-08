@@ -8,3 +8,7 @@ __pycache__/
 # 临时/本地
 *.log
 .hermes/
+
+# 前端外壳构建产物与依赖(源码提交即可,Issue #25)
+frontend/node_modules/
+frontend/dist/

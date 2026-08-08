@@ -251,6 +251,123 @@ GOMOKU_PAIR_WINDOW = 3600      # 重复对手统计窗口(秒)
 GOMOKU_PAIR_LIMIT = 3          # 窗口内同一对手超过该局数则减半奖励
 GOMOKU_DAILY_CAP = 300         # 五子棋每日奖励上限
 
+# ============ Issue #28:玩法收益模型(常量集中 + 目标返奖率) ============
+# 返奖率 rtp = 期望产出 / 门票。设计目标:
+#   黄金矿工:门票回收玩法(高 rtp),靠每日 10 次次数限制封顶;
+#   老虎机/转盘:抽奖玩法(rtp < 100%),期望上消耗积分(金币回收池),由每日上限与翻倍机制兜底防无界;
+#   音乐:免费无门票,收益=得分,依赖玩家水平,rtp 不适用。
+def _slot_expected_payout():
+    """老虎机每注期望产出:三连 P(s)^3×x3 + 对子 2×PAIR×ΣP(s)²(1-P(s))"""
+    total = sum(SLOT_SYMBOLS[s]["w"] for s in SLOT_SYMBOLS)
+    p = {s: SLOT_SYMBOLS[s]["w"] / total for s in SLOT_SYMBOLS}
+    e = sum(p[s] ** 3 * SLOT_SYMBOLS[s]["x3"] for s in SLOT_SYMBOLS)
+    e += 2 * SLOT_PAIR_PAY * sum(p[s] ** 2 * (1 - p[s]) for s in SLOT_SYMBOLS)
+    return round(e, 2)
+
+
+def _slot_expected_var():
+    """老虎机期望产出方差:Var = E[X²] - E[X]²"""
+    total = sum(SLOT_SYMBOLS[s]["w"] for s in SLOT_SYMBOLS)
+    p = {s: SLOT_SYMBOLS[s]["w"] / total for s in SLOT_SYMBOLS}
+    e2 = sum(p[s] ** 3 * SLOT_SYMBOLS[s]["x3"] ** 2 for s in SLOT_SYMBOLS)
+    e2 += 2 * SLOT_PAIR_PAY ** 2 * sum(p[s] ** 2 * (1 - p[s]) for s in SLOT_SYMBOLS)
+    e = _slot_expected_payout()
+    return round(e2 - e * e, 1)
+
+
+def _wheel_expected_prize():
+    """转盘每次期望产出:Σ(prize×weight)/Σweight("再转一次"按 prize=-1 计,期望值仍准确)"""
+    total = sum(WHEEL_WEIGHTS)
+    return round(sum(WHEEL_SECTORS[i]["prize"] * WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))) / total, 2)
+
+
+def _wheel_expected_var():
+    """转盘期望产出方差"""
+    total = sum(WHEEL_WEIGHTS)
+    e = _wheel_expected_prize()
+    e2 = sum(WHEEL_SECTORS[i]["prize"] ** 2 * WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))) / total
+    return round(e2 - e * e, 1)
+
+
+GAME_ECONOMY = {
+    # 黄金矿工:门票 80,奖励在 [pay_min,pay_max] 上均匀随机(期望 150,方差 850),
+    # 返奖率 187.5%(高于 100%,属门票回收玩法,靠每日 10 局次数封顶防刷)
+    "goldminer": {
+        "ticket": GOLDMINER_TICKET,
+        "pay_range": [GOLDMINER_PAY_MIN, GOLDMINER_PAY_MAX],
+        "expected": round((GOLDMINER_PAY_MIN + GOLDMINER_PAY_MAX) / 2, 1),
+        "variance": round(((GOLDMINER_PAY_MAX - GOLDMINER_PAY_MIN + 1) ** 2 - 1) / 12, 1),
+        "daily_limit": GOLDMINER_DAILY_LIMIT,
+        "rtp": round(((GOLDMINER_PAY_MIN + GOLDMINER_PAY_MAX) / 2) / GOLDMINER_TICKET, 3),
+    },
+    # 水果老虎机:门票 5,期望产出 ≈3.20(三连大奖 + 对子保底),返奖率 ≈64%
+    # 目标设计:rtp 控制在 60%~70%,中奖体验频繁但对期望为负,配合每日 300 上限防套利
+    "slot": {
+        "ticket": SLOT_COST,
+        "pay_range": [0, max(SLOT_SYMBOLS[s]["x3"] for s in SLOT_SYMBOLS)],
+        "expected": _slot_expected_payout(),
+        "variance": _slot_expected_var(),
+        "daily_limit": SLOT_DAILY_MAX,
+        "rtp": round(_slot_expected_payout() / SLOT_COST, 3),
+    },
+    # 幸运大转盘:门票 10,期望产出 ≈6.99,返奖率 ≈69.9%(低于 100%,抽奖类积分回收)
+    # "再转一次"按概率 6% 额外赠券,实际期望再上浮约 6%×6.99≈0.42,仍为负期望设计
+    "wheel": {
+        "ticket": WHEEL_COST,
+        "pay_range": [min(s["prize"] for s in WHEEL_SECTORS), max(s["prize"] for s in WHEEL_SECTORS)],
+        "expected": _wheel_expected_prize(),
+        "variance": _wheel_expected_var(),
+        "daily_limit": None,   # 无独立日上限,受频率限制与全局每日可赚上限约束
+        "rtp": round(_wheel_expected_prize() / WHEEL_COST, 3),
+    },
+    # 音乐游戏:免费(无门票),收益 = 得分直接入账,期望随玩家水平(全 Perfect ≈ 谱面满分,
+    # 普通玩家约 3000~6000 分),rtp 不适用(无成本)
+    "rhythm": {
+        "ticket": 0,
+        "pay_range": [0, None],
+        "expected": None,
+        "expected_range": [3000, 6000],
+        "variance": None,
+        "daily_limit": SUBMIT_PER_DAY,
+        "rtp": None,
+    },
+}
+
+
+def game_odds():
+    """公开收益模型(/api/game/odds):各玩法门票/期望/方差/返奖率 + 农场作物收益-时长比。"""
+    farm_crops = {}
+    for c, info in CROPS.items():
+        net = info["sell"] - info["cost"]
+        farm_crops[c] = {
+            "name": info["name"], "cost": info["cost"], "sell": info["sell"],
+            "grow_sec": info["grow"], "net_profit": net,
+            "profit_per_min": round(net / info["grow"] * 60, 2),   # 收益/时长比(每分钟净收益)
+            "vip": bool(info.get("vip")),
+        }
+    # 短时(≤90s)/长时(>90s)作物收益对比
+    short = [c for c, v in farm_crops.items() if v["grow_sec"] <= 90]
+    long_ = [c for c, v in farm_crops.items() if v["grow_sec"] > 90]
+
+    def _avg(keys):
+        return round(sum(farm_crops[k]["profit_per_min"] for k in keys) / len(keys), 2) if keys else None
+
+    return {
+        "goldminer": {"name": "黄金矿工", **GAME_ECONOMY["goldminer"]},
+        "slot": {"name": "水果老虎机", **GAME_ECONOMY["slot"]},
+        "wheel": {"name": "幸运大转盘", **GAME_ECONOMY["wheel"]},
+        "rhythm": {"name": "音乐游戏", **GAME_ECONOMY["rhythm"]},
+        "farm": {
+            "crops": farm_crops,
+            "compare": {
+                "short": {"label": "短时作物(≤90s)", "avg_profit_per_min": _avg(short), "crops": short},
+                "long": {"label": "长时作物(>90s)", "avg_profit_per_min": _avg(long_), "crops": long_},
+            },
+            "note": "profit_per_min = (售价 - 种子价) / 生长秒数 × 60;短时作物周转快,长时作物单次利润高但占用地块久",
+        },
+    }
+
+
 _lock = threading.RLock()  # 可重入锁：嵌套调用不会死锁
 
 # 五子棋房间事件订阅（SSE 广播）
@@ -1682,6 +1799,10 @@ class Handler(BaseHTTPRequestHandler):
                                     "unread": unread, "today_earned": earned,
                                     "daily_cap": config_get("daily_earned_cap", DAILY_EARNED_CAP)})
 
+        if path == "/api/game/odds":
+            # 公开接口:玩法收益模型(门票/期望/方差/返奖率/农场收益时长比),无需登录
+            return self._send(200, game_odds())
+
         if path == "/api/leaderboard":
             kind = (q.get("type") or ["points"])[0]
             with _lock, db() as conn:
@@ -2534,6 +2655,127 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("DELETE FROM farm_seeds WHERE user_id=? AND crop=? AND count<=0", (uid, crop))
                 conn.commit()
             return self._send(200, {"ok": True,
+                                    "farm": farm_state(conn, uid, uid, user["username"])})
+
+        # 批量播种(单事务校验种子/地块,逐格返回结果;种子不足时按数量截断)
+        if path == "/api/farm/batch-plant":
+            user = self._me()
+            if not user:
+                return self._send(401, {"error": "未登录"})
+            raw = data.get("slot_list")
+            if not isinstance(raw, list) or not raw:
+                return self._send(400, {"error": "slot_list 必须是数组"})
+            crop = str(data.get("crop", ""))
+            if crop not in CROPS:
+                return self._send(400, {"error": "作物不存在"})
+            if CROPS[crop].get("vip") and not is_vip(user):
+                return self._send(400, {"error": "这是 VIP 专属作物，开通 VIP 后才能种植"})
+            slots = []
+            for s in raw:
+                try:
+                    si = int(s)
+                except Exception:
+                    continue
+                if 0 <= si < PLOT_COUNT:
+                    slots.append(si)
+            slots = list(dict.fromkeys(slots))   # 去重
+            if not slots:
+                return self._send(400, {"error": "没有可操作的槽位"})
+            results = {}
+            with _lock, db() as conn:
+                uid = user["id"]
+                seed = conn.execute("SELECT count FROM farm_seeds WHERE user_id=? AND crop=?",
+                                    (uid, crop)).fetchone()
+                if not seed or seed["count"] < 1:
+                    return self._send(400, {"error": "没有种子，先到种子商店购买"})
+                bad = {}
+                for slot in slots:
+                    pr = conn.execute("SELECT * FROM farm_plots WHERE user_id=? AND slot=?",
+                                      (uid, slot)).fetchone()
+                    if not (pr and pr["unlocked"]) and slot >= DEFAULT_PLOTS:
+                        bad[slot] = "该地块还未开垦"
+                        continue
+                    cur = conn.execute("SELECT * FROM farm WHERE user_id=? AND slot=?",
+                                       (uid, slot)).fetchone()
+                    if cur and cur["crop"] is not None:
+                        gh = building_level(conn, uid, "greenhouse")
+                        lv = pr["level"] if pr else 1
+                        if time.time() < cur["planted_at"] + farm_grow_seconds(cur["crop"], lv, gh):
+                            bad[slot] = "该地块还没成熟"
+                ok_slots = [s for s in slots if s not in bad]
+                # 种子不足:前 N 块播种成功,其余标记"种子不足"
+                if len(ok_slots) > seed["count"]:
+                    for slot in ok_slots[seed["count"]:]:
+                        bad[slot] = "种子不足"
+                    ok_slots = ok_slots[:seed["count"]]
+                for slot in ok_slots:
+                    conn.execute("UPDATE farm_seeds SET count=count-1 WHERE user_id=? AND crop=?", (uid, crop))
+                    conn.execute(
+                        "INSERT OR REPLACE INTO farm(user_id,slot,crop,planted_at,waters,stolen,stolen_by) VALUES(?,?,?,?,0,0,NULL)",
+                        (uid, slot, crop, time.time()))
+                    results[slot] = {"ok": True}
+                for slot, err in bad.items():
+                    results[slot] = {"ok": False, "error": err}
+                conn.execute("DELETE FROM farm_seeds WHERE user_id=? AND crop=? AND count<=0", (uid, crop))
+                conn.commit()
+            return self._send(200, {"results": results, "points": user["points"],
+                                    "farm": farm_state(conn, uid, uid, user["username"])})
+
+        # 批量收获(单事务逐格收获,返回每格结果;仓库容量不足的格子保留原样)
+        if path == "/api/farm/batch-harvest":
+            user = self._me()
+            if not user:
+                return self._send(401, {"error": "未登录"})
+            raw = data.get("slot_list")
+            if not isinstance(raw, list) or not raw:
+                return self._send(400, {"error": "slot_list 必须是数组"})
+            slots = []
+            for s in raw:
+                try:
+                    si = int(s)
+                except Exception:
+                    continue
+                if 0 <= si < PLOT_COUNT:
+                    slots.append(si)
+            slots = list(dict.fromkeys(slots))
+            if not slots:
+                return self._send(400, {"error": "没有可操作的槽位"})
+            results = {}
+            with _lock, db() as conn:
+                uid = user["id"]
+                inv, units = farm_inventory(conn, uid)
+                capacity = farm_capacity(conn, uid)
+                for slot in slots:
+                    row = conn.execute("SELECT * FROM farm WHERE user_id=? AND slot=?",
+                                       (uid, slot)).fetchone()
+                    if not row or not row["crop"]:
+                        results[slot] = {"ok": False, "error": "没有作物"}
+                        continue
+                    gh = building_level(conn, uid, "greenhouse")
+                    pr = conn.execute("SELECT * FROM farm_plots WHERE user_id=? AND slot=?",
+                                      (uid, slot)).fetchone()
+                    lv = pr["level"] if pr else 1
+                    grow = farm_grow_seconds(row["crop"], lv, gh)
+                    if time.time() < row["planted_at"] + grow:
+                        results[slot] = {"ok": False, "error": "还没成熟"}
+                        continue
+                    if row["stolen"]:
+                        results[slot] = {"ok": False, "error": f"作物已被 {row['stolen_by']} 偷走了！"}
+                        continue
+                    size = CROP_SIZE.get(row["crop"], 1)
+                    if units + size > capacity:
+                        results[slot] = {"ok": False, "error": f"仓库已满（{units}/{capacity}），请先出售作物"}
+                        continue
+                    conn.execute("INSERT INTO inventory(user_id,crop,count) VALUES(?,?,1) "
+                                 "ON CONFLICT(user_id,crop) DO UPDATE SET count=count+1",
+                                 (uid, row["crop"]))
+                    conn.execute("DELETE FROM farm WHERE user_id=? AND slot=?", (uid, slot))
+                    conn.execute("UPDATE users SET exp=exp+5 WHERE id=?", (uid,))
+                    units += size
+                    results[slot] = {"ok": True, "crop": row["crop"], "name": CROPS[row["crop"]]["name"]}
+                    log(conn, uid, user["username"], "farm_harvest", f"收获{CROPS[row['crop']]['name']}入仓", ip=ip)
+                conn.commit()
+            return self._send(200, {"results": results, "points": user["points"],
                                     "farm": farm_state(conn, uid, uid, user["username"])})
 
         # 购买种子(道具,不可出售)

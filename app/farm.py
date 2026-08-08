@@ -315,6 +315,137 @@ async def farm_plant(request: Request):
                                "farm": farm_state(conn, uid, uid, user["username"])})
 
 
+# 批量播种(单事务校验种子/地块,逐格返回结果;种子不足时按数量截断)
+@router.post("/api/farm/batch-plant")
+async def farm_batch_plant(request: Request):
+    data = await parse_body(request)
+    if data is None:
+        return json_response(400, {"error": "请求格式错误"})
+    user = me(request)
+    if not user:
+        return json_response(401, {"error": "未登录"})
+    raw = data.get("slot_list")
+    if not isinstance(raw, list) or not raw:
+        return json_response(400, {"error": "slot_list 必须是数组"})
+    crop = str(data.get("crop", ""))
+    if crop not in CROPS:
+        return json_response(400, {"error": "作物不存在"})
+    if CROPS[crop].get("vip") and not is_vip(user):
+        return json_response(400, {"error": "这是 VIP 专属作物，开通 VIP 后才能种植"})
+    slots = []
+    for s in raw:
+        try:
+            si = int(s)
+        except Exception:
+            continue
+        if 0 <= si < PLOT_COUNT:
+            slots.append(si)
+    slots = list(dict.fromkeys(slots))
+    if not slots:
+        return json_response(400, {"error": "没有可操作的槽位"})
+    results = {}
+    with _lock, db() as conn:
+        uid = user["id"]
+        seed = conn.execute("SELECT count FROM farm_seeds WHERE user_id=? AND crop=?",
+                            (uid, crop)).fetchone()
+        if not seed or seed["count"] < 1:
+            return json_response(400, {"error": "没有种子，先到种子商店购买"})
+        bad = {}
+        for slot in slots:
+            pr = conn.execute("SELECT * FROM farm_plots WHERE user_id=? AND slot=?",
+                              (uid, slot)).fetchone()
+            if not (pr and pr["unlocked"]) and slot >= DEFAULT_PLOTS:
+                bad[slot] = "该地块还未开垦"
+                continue
+            cur = conn.execute("SELECT * FROM farm WHERE user_id=? AND slot=?",
+                               (uid, slot)).fetchone()
+            if cur and cur["crop"] is not None:
+                gh = building_level(conn, uid, "greenhouse")
+                lv = pr["level"] if pr else 1
+                if time.time() < cur["planted_at"] + farm_grow_seconds(cur["crop"], lv, gh):
+                    bad[slot] = "该地块还没成熟"
+        ok_slots = [s for s in slots if s not in bad]
+        if len(ok_slots) > seed["count"]:
+            for slot in ok_slots[seed["count"]:]:
+                bad[slot] = "种子不足"
+            ok_slots = ok_slots[:seed["count"]]
+        for slot in ok_slots:
+            conn.execute("UPDATE farm_seeds SET count=count-1 WHERE user_id=? AND crop=?", (uid, crop))
+            # SQLite `INSERT OR REPLACE` → PG: `INSERT ... ON CONFLICT(user_id,slot) DO UPDATE SET ...`
+            conn.execute("INSERT OR REPLACE INTO farm(user_id,slot,crop,planted_at,waters,stolen,stolen_by) VALUES(?,?,?,?,0,0,NULL)",
+                         (uid, slot, crop, time.time()))
+            results[slot] = {"ok": True}
+        for slot, err in bad.items():
+            results[slot] = {"ok": False, "error": err}
+        conn.execute("DELETE FROM farm_seeds WHERE user_id=? AND crop=? AND count<=0", (uid, crop))
+        conn.commit()
+    return json_response(200, {"results": results, "points": user["points"],
+                               "farm": farm_state(conn, uid, uid, user["username"])})
+
+
+# 批量收获(单事务逐格收获,返回每格结果;仓库容量不足的格子保留原样)
+@router.post("/api/farm/batch-harvest")
+async def farm_batch_harvest(request: Request):
+    data = await parse_body(request)
+    if data is None:
+        return json_response(400, {"error": "请求格式错误"})
+    ip = request.client.host if request.client else ""
+    user = me(request)
+    if not user:
+        return json_response(401, {"error": "未登录"})
+    raw = data.get("slot_list")
+    if not isinstance(raw, list) or not raw:
+        return json_response(400, {"error": "slot_list 必须是数组"})
+    slots = []
+    for s in raw:
+        try:
+            si = int(s)
+        except Exception:
+            continue
+        if 0 <= si < PLOT_COUNT:
+            slots.append(si)
+    slots = list(dict.fromkeys(slots))
+    if not slots:
+        return json_response(400, {"error": "没有可操作的槽位"})
+    results = {}
+    with _lock, db() as conn:
+        uid = user["id"]
+        inv, units = farm_inventory(conn, uid)
+        capacity = farm_capacity(conn, uid)
+        for slot in slots:
+            row = conn.execute("SELECT * FROM farm WHERE user_id=? AND slot=?",
+                               (uid, slot)).fetchone()
+            if not row or not row["crop"]:
+                results[slot] = {"ok": False, "error": "没有作物"}
+                continue
+            gh = building_level(conn, uid, "greenhouse")
+            pr = conn.execute("SELECT * FROM farm_plots WHERE user_id=? AND slot=?",
+                              (uid, slot)).fetchone()
+            lv = pr["level"] if pr else 1
+            grow = farm_grow_seconds(row["crop"], lv, gh)
+            if time.time() < row["planted_at"] + grow:
+                results[slot] = {"ok": False, "error": "还没成熟"}
+                continue
+            if row["stolen"]:
+                results[slot] = {"ok": False, "error": f"作物已被 {row['stolen_by']} 偷走了！"}
+                continue
+            size = CROP_SIZE.get(row["crop"], 1)
+            if units + size > capacity:
+                results[slot] = {"ok": False, "error": f"仓库已满（{units}/{capacity}），请先出售作物"}
+                continue
+            conn.execute("INSERT INTO inventory(user_id,crop,count) VALUES(?,?,1) "
+                         "ON CONFLICT(user_id,crop) DO UPDATE SET count=count+1",  # PG: EXCLUDED.count
+                         (uid, row["crop"]))
+            conn.execute("DELETE FROM farm WHERE user_id=? AND slot=?", (uid, slot))
+            conn.execute("UPDATE users SET exp=exp+5 WHERE id=?", (uid,))
+            units += size
+            results[slot] = {"ok": True, "crop": row["crop"], "name": CROPS[row["crop"]]["name"]}
+            log(conn, uid, user["username"], "farm_harvest", f"收获{CROPS[row['crop']]['name']}入仓", ip=ip)
+        conn.commit()
+    return json_response(200, {"results": results, "points": user["points"],
+                               "farm": farm_state(conn, uid, uid, user["username"])})
+
+
 # 购买种子(道具,不可出售)
 @router.post("/api/farm/buy-seed")
 async def farm_buy_seed(request: Request):

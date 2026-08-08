@@ -430,18 +430,15 @@ async function harvestAll() {
   const ready = farm.plots.filter(p => p.unlocked && p.crop && p.ready && !p.stolen);
   if (!ready.length) { toast("没有成熟作物可收", "info"); return; }
   setBusy(true);
-  let ok = 0; const fails = [];
-  for (const p of ready) {
-    try {
-      const r = await Api.farmHarvest(p.slot);
-      farm = r.farm; myPoints = r.points;
-      ok++;
-    } catch (e) { if (fails.length < 3) fails.push(e.message); }
-  }
+  try {
+    const r = await Api.farmBatchHarvest(ready.map(p => p.slot));
+    farm = r.farm; myPoints = r.points ?? myPoints;
+    const ok = Object.values(r.results).filter(x => x.ok).length;
+    renderAll(); refreshPoints();
+    toast(ok ? `🌾 一键收获完成，收了 ${ok} 块地` : "没有收获成功", ok ? "ok" : "err");
+    Object.values(r.results).filter(x => !x.ok).slice(0, 3).forEach(x => toast(x.error, "err"));
+  } catch (e) { toast(e.message, "err"); }
   setBusy(false);
-  renderAll(); refreshPoints();
-  toast(ok ? `🌾 一键收获完成，收了 ${ok} 块地` : "没有收获成功", ok ? "ok" : "err");
-  fails.forEach(m => toast(m, "err"));
 }
 
 async function plantAll() {
@@ -451,18 +448,15 @@ async function plantAll() {
   const empties = farm.plots.filter(p => p.unlocked && !p.crop);
   if (!empties.length) { toast("没有空地可种", "info"); return; }
   setBusy(true);
-  let ok = 0; const fails = [];
-  for (const p of empties) {
-    try {
-      const r = await Api.farmPlant(p.slot, selected);
-      farm = r.farm; myPoints = r.points;
-      ok++;
-    } catch (e) { if (fails.length < 3) fails.push(e.message); }
-  }
+  try {
+    const r = await Api.farmBatchPlant(empties.map(p => p.slot), selected);
+    farm = r.farm; myPoints = r.points ?? myPoints;
+    const ok = Object.values(r.results).filter(x => x.ok).length;
+    renderAll(); refreshPoints();
+    toast(ok ? `🌱 一键播种完成，种了 ${ok} 块地` : "没有播种成功", ok ? "ok" : "err");
+    Object.values(r.results).filter(x => !x.ok).slice(0, 3).forEach(x => toast(x.error, "err"));
+  } catch (e) { toast(e.message, "err"); }
   setBusy(false);
-  renderAll(); refreshPoints();
-  toast(ok ? `🌱 一键播种完成，种了 ${ok} 块地` : "没有播种成功", ok ? "ok" : "err");
-  fails.forEach(m => toast(m, "err"));
 }
 
 document.getElementById("btn-harvest-all").onclick = harvestAll;
@@ -649,7 +643,24 @@ async function load() {
 
 window.onAuthChange = () => load();
 load();
-setInterval(load, 2500);
+/* 轮询降频:2.5s → 10s;页面隐藏(document.hidden)时暂停,回到前台立即刷新再恢复 */
+let pollTimer = null;
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(() => { if (!document.hidden) load(); }, 10000);
+}
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopPolling();
+  } else {
+    load();
+    startPolling();
+  }
+});
+startPolling();
 </script>
 </body>
 </html>
