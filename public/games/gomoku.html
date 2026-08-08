@@ -239,8 +239,8 @@ function applyState(s) {
   /* 胜利高亮 */
   if (s.winner !== null && s.winner !== undefined) {
     let winColor = 0;
-    if (s.winner === s.black_id) winColor = 1;
-    else if (s.winner === s.white_id) winColor = 2;
+    if (s.winner === s.player_black) winColor = 1;
+    else if (s.winner === s.player_white) winColor = 2;
     else if (s.winner === 0) winColor = 2;
     highlightWin(s.board, winColor).forEach(([i, j]) => {
       const key = `${i},${j}`;
@@ -249,16 +249,39 @@ function applyState(s) {
   }
   /* 状态信息 */
   const info = document.getElementById("game-info");
-  const colorName = s.my_color === "black" ? "⚫ 黑棋" : s.my_color === "white" ? "⚪ 白棋" : "-";
+  const myId = (Store.user && Store.user.id) || s.my_id;
+  const REASON_TEXT = { normal: "五连获胜", resign: "认输", timeout: "超时判负", draw: "和棋" };
+  const colorName = s.my_color === "black" ? "⚫ 黑棋" : s.my_color === "white" ? "⚪ 白棋" : "观战";
+  const oppOnline = s.my_color === "black" ? s.white_online : (s.my_color === "white" ? s.black_online : false);
   if (s.status === "waiting") {
     info.innerHTML = `状态：<b style="color:var(--gold)">等待对手加入…</b><br>你是 ${colorName}，先手`;
   } else if (s.status === "playing") {
     const turn = s.turn === 1 ? "⚫ 黑棋" : "⚪ 白棋";
-    info.innerHTML = `你是 ${colorName}<br>轮到：<b style="color:${s.turn === 1 ? "#fff" : "#ffc94d"}">${turn}</b>${s.mode === "bot" ? "（AI）" : ""}<br>${s.can_move ? "👉 点击棋盘落子" : ""}`;
+    let oppLine = "";
+    if (s.my_color) {
+      if (s.mode === "bot") {
+        oppLine = "<br>对手：🤖 AI";
+      } else {
+        const who = escapeHtml(s.my_color === "black" ? s.white_name || "白棋" : s.black_name || "黑棋");
+        oppLine = `<br>对手：${who} ${oppOnline ? "🟢 在线" : "⚪ 离线"}`;
+      }
+    }
+    info.innerHTML = `你是 ${colorName}${oppLine}<br>轮到：<b style="color:${s.turn === 1 ? "#fff" : "#ffc94d"}">${turn}</b>${s.mode === "bot" ? "（AI）" : ""}<br>${s.can_move ? "👉 点击棋盘落子" : ""}`;
   } else {
-    let res = "对局结束";
-    if (s.reason) res = `${s.reason} · `;
-    res += s.winner === null ? "平局" : (s.winner === s.black_online ? "⚫ 黑方胜" : s.winner === s.white_online ? "⚪ 白方胜" : "AI 获胜");
+    const reasonTxt = (s.reason && REASON_TEXT[s.reason]) ? REASON_TEXT[s.reason] : (s.reason || "");
+    let res;
+    if (s.winner === null || s.winner === undefined) {
+      res = reasonTxt ? `${reasonTxt} · 平局` : "平局";
+    } else if (s.winner === 0 || (s.winner !== s.player_black && s.winner !== s.player_white)) {
+      res = reasonTxt ? `${reasonTxt} · AI 获胜` : "AI 获胜";
+    } else if (s.winner === myId) {
+      res = "🎉 你赢了！";
+    } else if (myId === s.player_black || myId === s.player_white) {
+      res = "你输了，再接再厉";
+    } else {
+      const wc = s.winner === s.player_black ? "⚫ 黑方" : "⚪ 白方";
+      res = `${wc}获胜（观战）`;
+    }
     info.innerHTML = `状态：<b style="color:var(--gold)">${res}</b><br>积分已结算`;
     toast(`对局结束：${res}`, "ok");
     refreshPoints();
@@ -273,7 +296,14 @@ function connectRoom(code) {
   clearInterval(pollTimer);
   es = new EventSource(`/api/gomoku/stream?code=${code}`);
   es.onmessage = (ev) => {
-    if (!ev.data || ev.data === "refresh" || ev.data === "null") return;
+    if (!ev.data) return;
+    if (ev.data === "refresh" || ev.data === "null") {
+      // 服务端广播(有人上线/离线/超时结算/对局结束):拉取最新状态
+      if (state && state.code) {
+        Api.gomokuRoom(state.code).then(applyState).catch(() => {});
+      }
+      return;
+    }
     try { applyState(JSON.parse(ev.data)); } catch (e) {}
   };
   es.onerror = () => { /* 自动重连，失败则轮询兜底 */ };
