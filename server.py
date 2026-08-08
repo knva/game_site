@@ -233,11 +233,19 @@ GOMOKU_SIZE = 15
 GOMOKU_WIN_POINTS = 30
 GOMOKU_LOSE_POINTS = 10
 GOMOKU_DRAW_POINTS = 15
+GOMOKU_ROOM_TTL = 300          # 等待房间无人加入 5 分钟自动删除
+GOMOKU_TURN_TIMEOUT = 60       # 每步 60 秒未落子判负
+GOMOKU_GAME_TIMEOUT = 1800     # 整局最长 30 分钟
+GOMOKU_MIN_MOVES = 4           # 少于 4 步的对局不发奖励
+GOMOKU_PAIR_WINDOW = 3600      # 重复对手统计窗口(秒)
+GOMOKU_PAIR_LIMIT = 3          # 窗口内同一对手超过该局数则减半奖励
+GOMOKU_DAILY_CAP = 300         # 五子棋每日奖励上限
 
 _lock = threading.RLock()  # 可重入锁：嵌套调用不会死锁
 
 # 五子棋房间事件订阅（SSE 广播）
 _room_subscribers = {}
+_room_online = {}  # code -> set(user_id)，以活跃 SSE 长连接判定在线
 _sub_lock = threading.Lock()
 
 
@@ -250,21 +258,35 @@ def _broadcast(code, state):
                 pass
 
 
-def _subscribe(code):
+def _online_ids(code):
+    """房间当前在线玩家 id 集合（以活跃 SSE 长连接为准）"""
+    with _sub_lock:
+        return set(_room_online.get(code, ()))
+
+
+def _subscribe(code, user_id=None):
     import queue
     q = queue.Queue(maxsize=50)
     with _sub_lock:
         _room_subscribers.setdefault(code, []).append(q)
+        if user_id:
+            _room_online.setdefault(code, set()).add(user_id)
     return q
 
 
-def _unsubscribe(code, q):
+def _unsubscribe(code, q, user_id=None):
     with _sub_lock:
         subs = _room_subscribers.get(code)
         if subs and q in subs:
             subs.remove(q)
             if not subs:
                 _room_subscribers.pop(code, None)
+        if user_id:
+            ids = _room_online.get(code)
+            if ids:
+                ids.discard(user_id)
+                if not ids:
+                    _room_online.pop(code, None)
 
 
 # ---------------- 数据库 ----------------
@@ -425,6 +447,17 @@ def init_db():
             winner INTEGER,
             result TEXT NOT NULL,
             at REAL NOT NULL)""")
+        # 五子棋迁移：补列（房间 TTL/超时/风控/结算原因）
+        _gr_cols = [r["name"] for r in conn.execute("PRAGMA table_info(gomoku_rooms)").fetchall()]
+        for _col, _decl in [("ip_black", "TEXT"), ("ip_white", "TEXT"),
+                            ("moves", "INTEGER NOT NULL DEFAULT 0"), ("started_at", "REAL")]:
+            if _col not in _gr_cols:
+                conn.execute(f"ALTER TABLE gomoku_rooms ADD COLUMN {_col} {_decl}")
+        _gg_cols = [r["name"] for r in conn.execute("PRAGMA table_info(gomoku_games)").fetchall()]
+        for _col, _decl in [("loser", "INTEGER"), ("reason", "TEXT"),
+                            ("moves", "INTEGER NOT NULL DEFAULT 0"), ("risk", "TEXT"), ("ended_at", "REAL")]:
+            if _col not in _gg_cols:
+                conn.execute(f"ALTER TABLE gomoku_games ADD COLUMN {_col} {_decl}")
         conn.execute("""CREATE TABLE IF NOT EXISTS wheel_logs(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -881,17 +914,177 @@ def gomoku_bot_move(board):
     return best
 
 
-def gomoku_award(conn, user_id, username, amount, detail, ip):
-    points = change_points(conn, user_id, username, amount, "gomoku_award", detail, ip)
+def gomoku_award(conn, user_id, username, amount, detail, ip, idem_key=None):
+    points = change_points(conn, user_id, username, amount, "gomoku_award", detail, ip, idem_key=idem_key)
     return points
 
 
-def gomoku_state(row, my_id):
+def _gomoku_daily_earned(conn, username, today):
+    """五子棋今日已获得积分（以 gomoku_award 日志聚合，持久化可靠）"""
+    day_start = time.mktime(time.strptime(today, "%Y-%m-%d"))
+    row = conn.execute("SELECT COALESCE(SUM(amount),0) s FROM logs "
+                       "WHERE username=? AND action='gomoku_award' AND at>=?",
+                       (username, day_start)).fetchone()
+    return row["s"]
+
+
+def _gomoku_risk_check(conn, row, moves):
+    """对局风控：过短对局 / 同 IP / 重复对手。返回 (命中列表, 奖励系数)。"""
+    risks, mult = [], 1.0
+    pb, pw = row["player_black"], row["player_white"]
+    if moves < GOMOKU_MIN_MOVES:
+        risks.append("too_short")
+        mult = 0.0
+    if row["ip_black"] and row["ip_white"] and row["ip_black"] == row["ip_white"]:
+        risks.append("same_ip")
+        mult = 0.0
+    if pb and pw:
+        n = conn.execute(
+            """SELECT COUNT(*) c FROM gomoku_games
+               WHERE ((player_black=? AND player_white=?) OR (player_black=? AND player_white=?)) AND at>?""",
+            (pb, pw, pw, pb, time.time() - GOMOKU_PAIR_WINDOW)).fetchone()["c"]
+        if n >= GOMOKU_PAIR_LIMIT:
+            risks.append("repeat_opponent")
+            mult = min(mult, 0.5)
+    return risks, mult
+
+
+def _gomoku_pay(conn, uid, base, code, role, mult, today, ip, reason, detail):
+    """给一名玩家发五子棋奖励（受风控系数 + 每日上限约束），返回实际发放额。"""
+    if not uid or uid == 0 or base <= 0:
+        return 0
+    u = conn.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
+    if not u:
+        return 0
+    amount = int(round(base * mult))
+    if amount <= 0:
+        return 0
+    remain = GOMOKU_DAILY_CAP - _gomoku_daily_earned(conn, u["username"], today)
+    if remain <= 0:
+        return 0
+    amount = min(amount, remain)
+    if amount <= 0:
+        return 0
+    gomoku_award(conn, uid, u["username"], amount, f"{detail} ({code})", ip,
+                 idem_key=f"gomoku:{code}:{role}:{uid}")
+    return amount
+
+
+def _finish_gomoku(conn, code, winner, reason, ip="", loser=None):
+    """结算五子棋：状态变更、历史记录与奖励发放同属一次调用（同一连接/事务内）。
+    winner: 玩家 id / 0=AI 获胜 / None=平局
+    reason: 'normal'(五连) / 'resign'(认输) / 'timeout'(超时) / 'draw'(和棋)
+    幂等：rewarded 标记 + WHERE rewarded=0 双重守卫，重复触发不重复发奖。
+    保存胜方(winner)、负方(loser)、结束原因(reason)。"""
+    row = conn.execute("SELECT * FROM gomoku_rooms WHERE code=?", (code,)).fetchone()
+    if not row or row["rewarded"]:
+        return row
+    now = time.time()
+    cur = conn.execute(
+        "UPDATE gomoku_rooms SET status='over', winner=?, reason=?, rewarded=1, last_move_at=? "
+        "WHERE code=? AND rewarded=0", (winner, reason, now, code))
+    if cur.rowcount == 0:
+        return conn.execute("SELECT * FROM gomoku_rooms WHERE code=?", (code,)).fetchone()
+    pb, pw = row["player_black"], row["player_white"]
+    is_bot = pw == 0
+    if winner is None:
+        result = "draw"
+    elif winner == 0:
+        result = "white"
+    else:
+        result = "black" if winner == pb else ("white" if winner == pw else "draw")
+    if loser is None and winner not in (None, 0):
+        loser = pw if winner == pb else pb
+    elif winner == 0 and loser is None and pb:
+        loser = pb
+    moves = row["moves"] or sum(1 for c in (json.loads(row["board"]) or []) if c)
+    risks, mult = _gomoku_risk_check(conn, row, moves)
+    conn.execute(
+        "INSERT INTO gomoku_games(code,player_black,player_white,winner,loser,result,reason,moves,risk,at,ended_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (code, pb, pw, winner, loser, result, reason, moves,
+         json.dumps(risks, ensure_ascii=False), row["created_at"], now))
+    today = time.strftime("%Y-%m-%d")
+    if winner is None:
+        if not is_bot and pw:
+            _gomoku_pay(conn, pb, GOMOKU_DRAW_POINTS, code, "draw_b", mult, today, ip, reason, "五子棋平局")
+            _gomoku_pay(conn, pw, GOMOKU_DRAW_POINTS, code, "draw_w", mult, today, ip, reason, "五子棋平局")
+    elif winner == 0:
+        if pb:
+            _gomoku_pay(conn, pb, GOMOKU_LOSE_POINTS, code, "lose", mult, today, ip, reason, "五子棋输给AI")
+    else:
+        _gomoku_pay(conn, winner, GOMOKU_WIN_POINTS, code, "win", mult, today, ip, reason, "五子棋获胜")
+        if loser:
+            _gomoku_pay(conn, loser, GOMOKU_LOSE_POINTS, code, "lose", mult, today, ip, reason, "五子棋参与")
+    conn.commit()
+    return row
+
+
+def _gomoku_check_timeout(conn, row, now=None):
+    """进行中对局超时判定：回合超时（每步）或整局超时，超时方=当前轮到的一方，判负。
+    返回是否已结算（此时对局状态为 over）。"""
+    now = now or time.time()
+    if row["status"] != "playing":
+        return False
+    anchor = row["last_move_at"] or row["started_at"] or row["created_at"]
+    if not anchor:
+        return False
+    turn_over = now - anchor >= GOMOKU_TURN_TIMEOUT
+    game_over = bool(row["started_at"]) and now - row["started_at"] >= GOMOKU_GAME_TIMEOUT
+    if not turn_over and not game_over:
+        return False
+    loser = row["player_black"] if row["turn"] == 1 else row["player_white"]
+    winner = row["player_white"] if row["turn"] == 1 else row["player_black"]
+    _finish_gomoku(conn, row["code"], winner, "timeout", "", loser=loser)
+    return True
+
+
+def _gomoku_cleanup_loop():
+    """后台循环：过期等待房间自动删除 + 超时对局自动判负（SSE 广播刷新）。"""
+    while True:
+        time.sleep(10)
+        try:
+            with _lock, db() as conn:
+                now = time.time()
+                conn.execute("DELETE FROM gomoku_rooms WHERE status='waiting' AND created_at<?",
+                             (now - GOMOKU_ROOM_TTL,))
+                conn.commit()
+                rows = conn.execute(
+                    "SELECT * FROM gomoku_rooms WHERE status='playing' "
+                    "AND ((last_move_at IS NOT NULL AND last_move_at<?) "
+                    "OR (started_at IS NOT NULL AND started_at<?))",
+                    (now - GOMOKU_TURN_TIMEOUT, now - GOMOKU_GAME_TIMEOUT)).fetchall()
+                settled = []
+                for r in rows:
+                    if _gomoku_check_timeout(conn, r, now):
+                        settled.append(r["code"])
+                conn.commit()
+            for c in settled:
+                _broadcast(c, None)
+        except Exception:
+            pass
+
+
+def gomoku_state(row, my_id, conn=None):
+    """房间状态。player_black/player_white 为用户 ID(数字)或 0=AI；
+    black_online/white_online 为布尔(以 SSE 长连接判在线)。"""
     try:
         board = json.loads(row["board"])
     except Exception:
         board = gomoku_new_board()
-    mine = "black" if my_id == row["player_black"] else ("white" if my_id == row["player_white"] else None)
+    pb, pw = row["player_black"], row["player_white"]
+    mine = "black" if my_id == pb else ("white" if my_id == pw else None)
+    online = _online_ids(row["code"])
+    black_online = pb is not None and pb in online
+    white_online = pw is not None and pw in online
+    black_name = white_name = None
+    if conn is not None:
+        if pb:
+            r = conn.execute("SELECT username FROM users WHERE id=?", (pb,)).fetchone()
+            black_name = r["username"] if r else None
+        if pw:
+            r = conn.execute("SELECT username FROM users WHERE id=?", (pw,)).fetchone()
+            white_name = r["username"] if r else None
     return {
         "code": row["code"],
         "mode": row["mode"],
@@ -902,54 +1095,16 @@ def gomoku_state(row, my_id):
         "reason": row["reason"],
         "my_color": mine,
         "my_id": my_id,
-        "black_id": row["player_black"],
-        "white_id": row["player_white"],
-        "black_online": row["player_black"] is not None,
-        "white_online": bool(row["player_white"]),
-        "can_join": row["status"] == "waiting" and row["player_black"] != my_id,
+        "player_black": pb,
+        "player_white": pw,
+        "black_online": black_online,
+        "white_online": white_online,
+        "black_name": black_name,
+        "white_name": white_name,
+        "can_join": row["status"] == "waiting" and pb != my_id,
         "can_move": row["status"] == "playing" and mine is not None
                     and ((row["turn"] == 1 and mine == "black") or (row["turn"] == 2 and mine == "white")),
     }
-
-
-def _finish_gomoku(conn, code, winner, reason, ip=""):
-    """结算五子棋：发积分（仅一次）、写历史、广播。
-    winner: 玩家 id / 0=AI 获胜 / None=平局"""
-    row = conn.execute("SELECT * FROM gomoku_rooms WHERE code=?", (code,)).fetchone()
-    if not row or row["status"] == "over":
-        return None
-    conn.execute("UPDATE gomoku_rooms SET status='over', winner=?, reason=?, last_move_at=? WHERE code=?",
-                 (winner, reason, time.time(), code))
-    conn.commit()
-    pv = row["player_white"]
-    is_bot = pv == 0
-    result = "black" if winner == row["player_black"] else ("white" if not is_bot and winner == pv else "draw")
-    conn.execute("INSERT INTO gomoku_games(code,player_black,player_white,winner,result,at) VALUES(?,?,?,?,?,?)",
-                 (code, row["player_black"], row["player_white"], winner, result, time.time()))
-    if not row["rewarded"]:
-        conn.execute("UPDATE gomoku_rooms SET rewarded=1 WHERE code=?", (code,))
-        pb = row["player_black"]
-        if winner is None:
-            if not is_bot:
-                for uid in (pb, pv):
-                    u = conn.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
-                    if u:
-                        gomoku_award(conn, uid, u["username"], GOMOKU_DRAW_POINTS, f"五子棋平局 ({code})", ip)
-        elif winner == 0:
-            u = conn.execute("SELECT username FROM users WHERE id=?", (pb,)).fetchone()
-            if u:
-                gomoku_award(conn, pb, u["username"], GOMOKU_LOSE_POINTS, f"五子棋输给AI ({code})", ip)
-        else:
-            u = conn.execute("SELECT username FROM users WHERE id=?", (winner,)).fetchone()
-            if u:
-                gomoku_award(conn, winner, u["username"], GOMOKU_WIN_POINTS, f"五子棋获胜 ({code})", ip)
-            loser = pv if winner == pb else pb
-            if not is_bot and loser is not None:
-                u = conn.execute("SELECT username FROM users WHERE id=?", (loser,)).fetchone()
-                if u:
-                    gomoku_award(conn, loser, u["username"], GOMOKU_LOSE_POINTS, f"五子棋参与 ({code})", ip)
-        conn.commit()
-    return row
 
 
 def _gomoku_bot_turn(code):
@@ -959,21 +1114,28 @@ def _gomoku_bot_turn(code):
         row = conn.execute("SELECT * FROM gomoku_rooms WHERE code=?", (code,)).fetchone()
         if not row or row["status"] != "playing" or row["turn"] != 2 or row["player_white"]:
             return  # 非 bot 局或有真人白方则不行动
+        if _gomoku_check_timeout(conn, row):
+            conn.commit()
+            _broadcast(code, None)
+            return
         board = json.loads(row["board"])
         mv = gomoku_bot_move(board)
         if mv is None:
-            _finish_gomoku(conn, code, None, "和棋", "")
+            _finish_gomoku(conn, code, None, "draw", "")
+            conn.commit()
+            _broadcast(code, None)
             return
         x, y = mv
         board[y * GOMOKU_SIZE + x] = 2
         won = gomoku_win(board, x, y, 2)
         full = gomoku_full(board)
         if won or full:
-            conn.execute("UPDATE gomoku_rooms SET board=?, turn=1 WHERE code=?", (json.dumps(board), code))
+            conn.execute("UPDATE gomoku_rooms SET board=?, turn=1, moves=moves+1 WHERE code=?",
+                         (json.dumps(board), code))
+            _finish_gomoku(conn, code, 0 if won else None, "normal" if won else "draw", "")
             conn.commit()
-            _finish_gomoku(conn, code, 0 if won else None, "白棋(AI)连五" if won else "和棋", "")
         else:
-            conn.execute("UPDATE gomoku_rooms SET board=?, turn=1, last_move_at=? WHERE code=?",
+            conn.execute("UPDATE gomoku_rooms SET board=?, turn=1, last_move_at=?, moves=moves+1 WHERE code=?",
                          (json.dumps(board), time.time(), code))
             conn.commit()
     _broadcast(code, None)
@@ -1325,7 +1487,17 @@ class Handler(BaseHTTPRequestHandler):
                 row = conn.execute("SELECT * FROM gomoku_rooms WHERE code=?", (code,)).fetchone()
                 if not row:
                     return self._send(404, {"error": "房间不存在"})
-            return self._send(200, gomoku_state(row, user["id"]))
+                now = time.time()
+                if row["status"] == "waiting" and now - row["created_at"] >= GOMOKU_ROOM_TTL:
+                    conn.execute("DELETE FROM gomoku_rooms WHERE code=?", (code,))
+                    conn.commit()
+                    return self._send(404, {"error": "房间已过期"})
+                if row["status"] == "playing":
+                    _gomoku_check_timeout(conn, row, now)
+                    conn.commit()
+                    row = conn.execute("SELECT * FROM gomoku_rooms WHERE code=?", (code,)).fetchone()
+                state = gomoku_state(row, user["id"], conn)
+            return self._send(200, state)
 
         if path == "/api/gomoku/stream":
             code = (q.get("code") or [""])[0].strip().upper()
@@ -1340,10 +1512,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            q = _subscribe(code)
+            q = _subscribe(code, user["id"])
             try:
                 self.wfile.write(b"retry: 2000\n\n")
                 self.wfile.flush()
+                _broadcast(code, None)  # 上线通知，让对手刷新在线状态
                 while True:
                     try:
                         ev = q.get(timeout=15)
@@ -1355,14 +1528,15 @@ class Handler(BaseHTTPRequestHandler):
                         ev = "refresh"
                     with _lock, db() as conn:
                         row = conn.execute("SELECT * FROM gomoku_rooms WHERE code=?", (code,)).fetchone()
-                        state = gomoku_state(row, user["id"]) if row else None
+                        state = gomoku_state(row, user["id"], conn) if row else None
                     payload = json.dumps(state, ensure_ascii=False)
                     self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass
             finally:
-                _unsubscribe(code, q)
+                _unsubscribe(code, q, user["id"])
+                _broadcast(code, None)  # 离线通知
             return
 
         if path == "/api/checkin/status":
@@ -2238,11 +2412,13 @@ class Handler(BaseHTTPRequestHandler):
             if not rate_check(f"gomo:{user['username']}", 30, 3600):
                 return self._send(429, {"error": "建房过于频繁"})
             code = secrets.token_hex(3).upper()
+            now = time.time()
             with _lock, db() as conn:
-                conn.execute("""INSERT INTO gomoku_rooms(code,player_black,player_white,board,turn,status,mode,created_at)
-                                VALUES(?,?,?,?,?,?,?,?)""",
+                conn.execute("""INSERT INTO gomoku_rooms(code,player_black,player_white,board,turn,status,mode,created_at,started_at,ip_black)
+                                VALUES(?,?,?,?,?,?,?,?,?,?)""",
                              (code, user["id"], None, json.dumps(gomoku_new_board()), 1,
-                              "playing" if mode == "bot" else "waiting", mode, time.time()))
+                              "playing" if mode == "bot" else "waiting", mode, now,
+                              now if mode == "bot" else None, ip))
                 if mode == "bot":
                     conn.execute("UPDATE gomoku_rooms SET player_white=? WHERE code=?", (0, code))
                 conn.commit()
@@ -2258,12 +2434,15 @@ class Handler(BaseHTTPRequestHandler):
                 row = conn.execute("SELECT * FROM gomoku_rooms WHERE code=?", (code,)).fetchone()
                 if not row:
                     return self._send(404, {"error": "房间不存在"})
+                if row["status"] == "over":
+                    return self._send(409, {"error": "房间已结束"})
                 if row["status"] != "waiting":
                     return self._send(409, {"error": "房间已满或已开始"})
                 if row["player_black"] == user["id"]:
                     return self._send(400, {"error": "你已经在房间里了"})
-                conn.execute("UPDATE gomoku_rooms SET player_white=?, status='playing', last_move_at=? WHERE code=?",
-                             (user["id"], time.time(), code))
+                conn.execute(
+                    "UPDATE gomoku_rooms SET player_white=?, status='playing', last_move_at=?, started_at=?, ip_white=? WHERE code=?",
+                    (user["id"], time.time(), time.time(), ip, code))
                 conn.commit()
                 log(conn, user["id"], user["username"], "gomoku_join", f"加入房间 {code}", ip=ip)
             _broadcast(code, None)
@@ -2286,6 +2465,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(404, {"error": "房间不存在"})
                 if row["status"] != "playing":
                     return self._send(400, {"error": "对局未在进行中"})
+                if _gomoku_check_timeout(conn, row):
+                    conn.commit()
+                    _broadcast(code, None)
+                    return self._send(400, {"error": "回合超时，对局已结束"})
+                row = conn.execute("SELECT * FROM gomoku_rooms WHERE code=?", (code,)).fetchone()
                 color = 1 if user["id"] == row["player_black"] else (2 if user["id"] == row["player_white"] else 0)
                 if not color:
                     return self._send(400, {"error": "你不是本局玩家"})
@@ -2298,15 +2482,15 @@ class Handler(BaseHTTPRequestHandler):
                 won = gomoku_win(board, x, y, color)
                 full = gomoku_full(board)
                 if won or full:
-                    conn.execute("UPDATE gomoku_rooms SET board=? WHERE code=?",
+                    conn.execute("UPDATE gomoku_rooms SET board=?, moves=moves+1 WHERE code=?",
                                  (json.dumps(board), code))
-                    conn.commit()
                     _finish_gomoku(conn, code, user["id"] if won else None,
-                                   ("黑棋连五" if color == 1 else "白棋连五") if won else "棋盘已满", ip)
+                                   "normal" if won else "draw", ip)
+                    conn.commit()
                     log(conn, user["id"], user["username"], "gomoku_move", f"房间{code}落子({x},{y})", ip=ip)
                     _broadcast(code, None)
                     return self._send(200, {"ok": True, "over": True, "winner": user["id"] if won else None})
-                conn.execute("UPDATE gomoku_rooms SET board=?, turn=?, last_move_at=? WHERE code=?",
+                conn.execute("UPDATE gomoku_rooms SET board=?, turn=?, last_move_at=?, moves=moves+1 WHERE code=?",
                              (json.dumps(board), 3 - color, time.time(), code))
                 conn.commit()
                 log(conn, user["id"], user["username"], "gomoku_move", f"房间{code}落子({x},{y})", ip=ip)
@@ -2332,15 +2516,16 @@ class Handler(BaseHTTPRequestHandler):
                     conn.execute("DELETE FROM gomoku_rooms WHERE code=?", (code,))
                     conn.commit()
                     log(conn, uid, user["username"], "gomoku_cancel", f"取消房间 {code}", ip=ip)
+                    _broadcast(code, None)
                     return self._send(200, {"ok": True})
                 if row["status"] == "playing":
                     if uid not in (row["player_black"], row["player_white"]):
                         return self._send(403, {"error": "你不是本局玩家"})
                     opp = row["player_white"] if uid == row["player_black"] else row["player_black"]
-                    conn.execute("UPDATE gomoku_rooms SET status='over', winner=?, reason='对手认输' WHERE code=?",
-                                 (opp, code))
+                    # 认输：胜方=对手，结束原因 resign，奖励与状态在同一事务内结算
+                    _finish_gomoku(conn, code, opp, "resign", ip, loser=uid)
                     conn.commit()
-                    _finish_gomoku(conn, code, opp, "对手认输", ip)
+                    log(conn, uid, user["username"], "gomoku_leave", f"房间{code}认输", ip=ip)
             _broadcast(code, None)
             return self._send(200, {"ok": True})
 
@@ -2445,6 +2630,7 @@ def ensure_admins():
 def main():
     init_db()
     ensure_admins()
+    threading.Thread(target=_gomoku_cleanup_loop, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"🎮 小游戏乐园已启动: http://localhost:{PORT}")
     print(f"   数据: {DB_PATH}   注册用户均为普通用户,不自动成为管理员")
