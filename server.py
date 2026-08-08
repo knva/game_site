@@ -441,6 +441,10 @@ def init_db():
             detail TEXT,
             ip TEXT,
             created_at REAL NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS rate_limits(
+            key TEXT PRIMARY KEY,
+            count INTEGER NOT NULL,
+            window_start REAL NOT NULL)""")
         conn.commit()
 
 
@@ -474,54 +478,63 @@ def log(conn, user_id, username, action, detail="", amount=None, ip=""):
     conn.commit()
 
 
-# ---------------- 频率限制 ----------------
-_rates = {}
-
-
+# ---------------- 频率限制(持久化存储,重启不清零,多实例共享) ----------------
 def rate_check(key, limit, window, now=None):
+    """窗口限流:DB 持久化。窗口过期自动重置,计数原子递增。"""
     now = now or time.time()
-    with _lock:
-        q = _rates.setdefault(key, deque())
-        while q and q[0] < now - window:
-            q.popleft()
-        if len(q) >= limit:
+    with _lock, db() as conn:
+        row = conn.execute("SELECT count FROM rate_limits WHERE key=? AND window_start>?",
+                           (key, now - window)).fetchone()
+        if not row:
+            conn.execute("INSERT INTO rate_limits(key,count,window_start) VALUES(?,1,?) "
+                         "ON CONFLICT(key) DO UPDATE SET count=1, window_start=excluded.window_start",
+                         (key, now))
+            conn.commit()
+            return True
+        if row["count"] >= limit:
             return False
-        q.append(now)
+        conn.execute("UPDATE rate_limits SET count=count+1 WHERE key=?", (key,))
+        conn.commit()
         return True
 
 
 def daily_earned(name, today):
-    with _lock:
-        key = f"earn:{today}:{name}"
-        return _rates.setdefault(key, [0, time.time()])[0]
+    """今日已赚积分:从 logs 聚合(game_award/farm_harvest),持久化可靠"""
+    with _lock, db() as conn:
+        day_start = time.mktime(time.strptime(today, "%Y-%m-%d"))
+        row = conn.execute("SELECT COALESCE(SUM(amount),0) s FROM logs "
+                           "WHERE username=? AND action IN ('game_award','farm_harvest') AND at>=?",
+                           (name, day_start)).fetchone()
+        return row["s"]
 
 
 def add_daily_earned(name, amount, today):
-    with _lock:
-        key = f"earn:{today}:{name}"
-        v = _rates.setdefault(key, [0, time.time()])
-        v[0] += amount
+    """已由 logs/point_ledger 持久化,无需内存计数"""
+    pass
 
 
 def slot_daily_earned(name, today):
-    with _lock:
-        return _rates.setdefault(f"slotearn:{today}:{name}", [0, time.time()])[0]
+    """老虎机今日已赢:从 logs 聚合"""
+    with _lock, db() as conn:
+        day_start = time.mktime(time.strptime(today, "%Y-%m-%d"))
+        row = conn.execute("SELECT COALESCE(SUM(amount),0) s FROM logs "
+                           "WHERE username=? AND action='slot_win' AND at>=?",
+                           (name, day_start)).fetchone()
+        return row["s"]
 
 
 def add_slot_daily_earned(name, amount, today):
-    with _lock:
-        v = _rates.setdefault(f"slotearn:{today}:{name}", [0, time.time()])
-        v[0] += amount
+    """老虎机今日已赢由 slot_win 日志持久化,无需内存计数"""
+    pass
 
 
 def _rate_peek(key, window):
-    """查看窗口内已记录的次数（不计数）"""
+    """查看窗口内已记录的次数(不计数,持久化)"""
     now = time.time()
-    with _lock:
-        q = _rates.get(key, deque())
-        while q and q[0] < now - window:
-            q.popleft()
-        return len(q)
+    with _lock, db() as conn:
+        row = conn.execute("SELECT count FROM rate_limits WHERE key=? AND window_start>?",
+                           (key, now - window)).fetchone()
+        return row["count"] if row else 0
 
 
 # ---------------- 用户余额（所有变动都走这里 + 不可变流水 + 日志） ----------------
