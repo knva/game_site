@@ -54,7 +54,7 @@ const Api = {
   farmStealToggle: (open) => Api.post("/api/farm/steal-toggle", { open }),
   farmStealRandom: () => Api.get("/api/farm/steal-random"),
 
-  spin: () => Api.post("/api/wheel/spin"),
+  spin: (requestId) => Api.post("/api/wheel/spin", { request_id: requestId }),
   wheelStats: () => Api.get("/api/wheel/stats"),
   slotSpin: () => Api.post("/api/slot/spin"),
   slotDouble: (token) => Api.post("/api/slot/double", { token }),
