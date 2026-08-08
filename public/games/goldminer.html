@@ -268,6 +268,8 @@ function mulberry32(a) {
   };
 }
 const FIXED_SEED = 20260808;
+let goldminerSeed = FIXED_SEED;   // 开局时由服务器下发(防作弊,地图按服务端种子生成)
+let caught = [];                  // 本局抓取轨迹(结算时提交服务器校验)
 
 /* 按剩余时间计算大奖概率:0.05(开局) → 0.95(最后) */
 function bigChance() {
@@ -293,7 +295,7 @@ let popups = [];
 function genWorld() {
   items.forEach(it => it.el && it.el.remove());
   items = [];
-  const rnd = mulberry32(FIXED_SEED);
+  const rnd = mulberry32(goldminerSeed);
   const Y0 = 210, Y1 = H - 40;
   let guard = 0;
   while (items.length < 26 && guard++ < 700) {
@@ -391,6 +393,8 @@ function startGame() {
   submitted = false;
   Api.gameStart("goldminer").then(r => {
     gameToken = r.token;
+    goldminerSeed = r.goldminer_seed || FIXED_SEED;   // 服务器种子生成地图
+    caught = [];
     reset();
     genWorld();
     running = true;
@@ -492,6 +496,7 @@ function animate(t) {
         toast("绳子断了！", "err");
       } else if (h.len <= 8) {
         score += it.v;
+        caught.push({ v: it.v });
         burst(it.x, it.y, it.type === "diamond" ? "#81d4fa" : "#ffd54f", 30);
         popup(`+${it.v}`, it.x, it.y - 20);
         it.grabbed = false;
@@ -554,7 +559,7 @@ function finish() {
   if (submitted) return;
   submitted = true;
   stopRefresh();
-  Api.gameEnd("goldminer", gameToken, Math.round(score), {})
+  Api.gameEnd("goldminer", gameToken, Math.round(score), { catches: caught })
     .then(r => {
       toast(r.is_best ? `🎉 新纪录 ${r.earned} 分！收益 +${r.earned}💎` : `结算完成：收益 +${r.earned}💎`);
       refreshPoints();

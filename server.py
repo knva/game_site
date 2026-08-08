@@ -120,6 +120,60 @@ GOLDMINER_DAILY_LIMIT = 10
 GOLDMINER_TICKET = 80
 GOLDMINER_PAY_MIN = 100
 GOLDMINER_PAY_MAX = 200
+# 黄金矿工矿表(与前端 goldminer.html GEN 一致,服务器权威,用于重算地图校验结算)
+GOLDMINER_GEN = [
+    {"type": "gold", "r": 17, "w": 2.2, "v": 45, "big": 0},
+    {"type": "gold", "r": 25, "w": 1.6, "v": 90, "big": 0},
+    {"type": "gold", "r": 32, "w": 0.7, "v": 160, "big": 1},
+    {"type": "diamond", "r": 19, "w": 0.5, "v": 380, "big": 1},
+    {"type": "diamond", "r": 12, "w": 0.9, "v": 200, "big": 0.7},
+    {"type": "bag", "r": 22, "w": 0.8, "v": 130, "big": 0.7},
+    {"type": "rock", "r": 27, "w": 1.2, "v": 3, "big": 0},
+    {"type": "rock", "r": 38, "w": 0.8, "v": 3, "big": 0},
+]
+GOLDMINER_W = 860
+GOLDMINER_H = 520
+GOLDMINER_ITEMS = 26
+
+
+def _gm_mulberry32(a):
+    """前端 mulberry32 的 Python 复刻(32 位无符号运算,序列一致)"""
+    def imul(x, y):
+        return (x * y) & 0xFFFFFFFF
+
+    def f():
+        nonlocal a
+        a = (a + 0x6D2B79F5) & 0xFFFFFFFF
+        t = imul(a ^ (a >> 15), 1 | a)
+        old = t
+        t = (old + imul(old ^ (old >> 7), 61 | old)) & 0xFFFFFFFF
+        t = (t ^ old) & 0xFFFFFFFF
+        return ((t ^ (t >> 14)) & 0xFFFFFFFF) / 4294967296
+    return f
+
+
+def gen_goldminer_world(seed):
+    """复刻前端 genWorld:固定 seed 生成 26 个矿(位置+类型+分值)"""
+    rnd = _gm_mulberry32(seed & 0xFFFFFFFF)
+    items = []
+    guard = 0
+    while len(items) < GOLDMINER_ITEMS and guard < 700:
+        guard += 1
+        x = 50 + rnd() * (GOLDMINER_W - 100)
+        y = 210 + rnd() * ((GOLDMINER_H - 40) - 210)
+        total = sum(g["w"] * (1 + 0.5 * 4 if g["big"] else 1) for g in GOLDMINER_GEN)
+        t = rnd() * total
+        chosen = GOLDMINER_GEN[-1]
+        for g in GOLDMINER_GEN:
+            t -= g["w"] * (1 + 0.5 * 4 if g["big"] else 1)
+            if t <= 0:
+                chosen = g
+                break
+        r = chosen["r"]
+        if any(((o["x"] - x) ** 2 + (o["y"] - y) ** 2) ** 0.5 < o["r"] + r + 6 for o in items):
+            continue
+        items.append({**chosen, "x": x, "y": y})
+    return items
 
 # 水果老虎机
 SLOT_COST = 5
@@ -1455,6 +1509,7 @@ class Handler(BaseHTTPRequestHandler):
                 log(conn, user["id"], user["username"], "game_start", f"开始游戏 {game}", ip=ip)
             return self._send(200, {"ok": True, "token": token, "game": game,
                                     "chart": chart, "max_score": max_score,
+                                    "goldminer_seed": seed if game == "goldminer" else None,
                                     "duration": GAMES[game]["duration"],
                                     "ticket": GOLDMINER_TICKET if game == "goldminer" else 0,
                                     "daily_left": played if game == "goldminer" else None,
@@ -1500,6 +1555,26 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(400, {"error": "判定数据异常，提交被拒绝"})
                 earned = min(score, max_score)
                 if game == "goldminer":
+                    # 服务器用 seed 重算地图,校验抓取轨迹(防伪造分数)
+                    catches = stats.get("catches")
+                    if not isinstance(catches, list) or len(catches) > GOLDMINER_ITEMS:
+                        return self._send(400, {"error": "抓取数据异常"})
+                    world = gen_goldminer_world(sess["seed"])
+                    avail = {}
+                    for it in world:
+                        avail[it["v"]] = avail.get(it["v"], 0) + 1
+                    total_v = 0
+                    for c in catches:
+                        try:
+                            v = int(c.get("v", -1))
+                        except Exception:
+                            return self._send(400, {"error": "抓取数据异常"})
+                        if avail.get(v, 0) <= 0:
+                            return self._send(400, {"error": "抓取数据与地图不符"})
+                        avail[v] -= 1
+                        total_v += v
+                    if score != total_v:
+                        return self._send(400, {"error": "分数与抓取记录不符"})
                     earned = random.randint(GOLDMINER_PAY_MIN, GOLDMINER_PAY_MAX)
                 if daily_earned(user["username"], today) + earned > DAILY_EARNED_CAP:
                     return self._send(400, {"error": f"今日可赚积分已达上限（{DAILY_EARNED_CAP}）"})
