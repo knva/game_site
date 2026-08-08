@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小游戏乐园 - 积分排行</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="topbar"></div>
+
+<div class="hero">
+  <h1>🎮 小游戏乐园</h1>
+  <p>注册登录 · 六个小游戏赚取 💎积分 · 冲击排行榜之巅 · 还有漂流瓶与站内信等你探索！</p>
+</div>
+
+<div class="layout">
+  <div class="games">
+    <div class="game-card" onclick="location.href='/games/goldminer.html'">
+      <span class="game-icon">⛏️</span>
+      <h3>黄金矿工 <span class="new-tag">经典</span></h3>
+      <p>经典玩法！矿工在上方，左右移动，空格/点击放钩抓取金块钻石，60秒限时挖矿。</p>
+      <span class="tag">得分入排行榜</span>
+      <span class="go">开始游戏 →</span>
+    </div>
+    <div class="game-card" onclick="location.href='/games/rhythm.html'">
+      <span class="game-icon">🎹</span>
+      <h3>音乐游戏 · 8键 <span class="new-tag">3D</span></h3>
+      <p>Three.js 3D 音轨！8 个按键（A S D F J K L ;）跟随节奏打击高速落下的音符。</p>
+      <span class="tag">服务器生成谱面·防作弊</span>
+      <span class="go">开始游戏 →</span>
+    </div>
+    <div class="game-card" onclick="location.href='/games/gomoku.html'">
+      <span class="game-icon">⚫</span>
+      <h3>五子棋 <span class="new-tag">联机</span></h3>
+      <p>经典棋盘对战。约好友联机（房间码+站内信邀请），或与 AI 人机切磋。</p>
+      <span class="tag">联机对战</span>
+      <span class="go">开始游戏 →</span>
+    </div>
+    <div class="game-card" onclick="location.href='/games/slot.html'">
+      <span class="game-icon">🎰</span>
+      <h3>水果老虎机</h3>
+      <p>经典水果机！樱桃柠檬西瓜葡萄… 三连宝石大奖 300 分，服务器随机判定无法作弊。</p>
+      <span class="tag">每次 5 积分</span>
+      <span class="go">开始游戏 →</span>
+    </div>
+    <div class="game-card" onclick="location.href='/games/farm.html'">
+      <span class="game-icon">🌱</span>
+      <h3>开心农场</h3>
+      <p>买种子、播种、浇水、收获。离线也会继续生长，收获卖出赚取积分。</p>
+      <span class="tag">挂机也能赚积分</span>
+      <span class="go">开始游戏 →</span>
+    </div>
+    <div class="game-card" onclick="location.href='/games/wheel.html'">
+      <span class="game-icon">🎡</span>
+      <h3>幸运大转盘</h3>
+      <p>10积分转一次，最高赢 100 积分，还有神秘「再转一次」！服务器判定，公平公正。</p>
+      <span class="tag">刺激的抽奖</span>
+      <span class="go">开始游戏 →</span>
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="panel">
+      <h2>🏆 积分排行</h2>
+      <div class="rank-tabs">
+        <button data-type="points" class="active" onclick="switchRank(this)">总积分</button>
+        <button data-type="score" data-game="goldminer" onclick="switchRank(this)">挖矿</button>
+        <button data-type="score" data-game="rhythm" onclick="switchRank(this)">节奏</button>
+      </div>
+      <ul class="rank-list" id="rank-list"></ul>
+    </div>
+    <div class="panel">
+      <h2>📖 玩法说明</h2>
+      <p style="color:var(--muted);font-size:13px;line-height:1.9">
+        🆕 注册即送 <b style="color:var(--gold)">100 积分</b><br>
+        ⛏️ 黄金矿工：挖到的宝物按价值计分<br>
+        🎹 音乐游戏：完美 100分 / 精准 60分<br>
+        ⚫ 五子棋：获胜 +30 / 参与 +10<br>
+        🎰 老虎机：5积分一拉，最高中 300 分<br>
+        🌱 农场：收获作物获得卖出收益<br>
+        🎡 转盘：10积分一次，奖品丰厚<br>
+        📬 站内信 & 🍾 漂流瓶：社交互动<br>
+        🛡️ 所有得分由服务器校验，防篡改防重放
+      </p>
+    </div>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+async function switchRank(btn) {
+  document.querySelectorAll(".rank-tabs button").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  await refreshRank();
+}
+async function refreshRank() {
+  const btn = document.querySelector(".rank-tabs button.active");
+  try {
+    await renderLeaderboard(document.getElementById("rank-list"),
+      { type: btn.dataset.type, game: btn.dataset.game || "" });
+  } catch (e) {}
+}
+initTopBar();
+refreshRank();
+setInterval(refreshRank, 15000);
+</script>
+</body>
+</html>

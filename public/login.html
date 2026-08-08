@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>登录 · 小游戏乐园</title>
+<link rel="stylesheet" href="/css/style.css">
+<style>
+.auth-page {
+  min-height: calc(100vh - 64px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 30px 16px 60px;
+}
+.auth-card {
+  width: min(380px, 94vw); text-align: center;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 18px;
+  padding: 32px 28px; box-shadow: 0 24px 80px rgba(0,0,0,.55);
+}
+.auth-card .logo { font-size: 40px; margin-bottom: 4px; }
+.auth-card h1 {
+  font-size: 24px; letter-spacing: 2px; margin-bottom: 4px;
+  background: linear-gradient(90deg, var(--gold), var(--accent2), var(--accent));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.auth-sub { color: var(--muted); font-size: 13px; margin-bottom: 22px; }
+.auth-card input {
+  width: 100%; background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 12px; padding: 12px 14px; font-size: 14px; margin-bottom: 11px; outline: none;
+  box-sizing: border-box;
+}
+.auth-card input:focus { border-color: var(--accent); }
+.auth-err { color: var(--bad); font-size: 13px; min-height: 20px; margin-bottom: 8px; text-align: left; }
+.auth-tip {
+  margin-top: 14px; font-size: 12.5px; color: var(--muted); line-height: 1.8;
+  background: var(--panel2); border: 1px dashed var(--line); border-radius: 10px; padding: 10px 12px;
+}
+.back-home { display: inline-block; margin-top: 16px; color: var(--muted); font-size: 13px; text-decoration: none; }
+.back-home:hover { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="auth-page">
+  <div class="auth-card">
+    <div class="logo">🎮</div>
+    <h1>小游戏乐园</h1>
+    <div class="auth-sub" id="auth-sub">新用户注册即送 100 积分</div>
+    <input id="auth-user" maxlength="16" placeholder="昵称（2-16位中英文或数字）" autocomplete="username">
+    <input id="auth-pass" type="password" placeholder="密码（4-64位）" autocomplete="current-password">
+    <input id="auth-pass2" type="password" placeholder="确认密码" style="display:none" autocomplete="new-password">
+    <div class="auth-err" id="auth-err"></div>
+    <button class="btn" id="auth-submit" style="width:100%;padding:12px;font-size:15px">注 册</button>
+    <button class="btn gray" id="auth-switch" style="width:100%;margin-top:10px;padding:11px">已有账号？去登录</button>
+    <div class="auth-tip">
+      💎 注册即送 100 积分<br>
+      ⛏️ 黄金矿工 · 🎹 8键音游 · ⚫ 五子棋 · 🎰 老虎机 · 🌱 农场 · 🎡 转盘<br>
+      首个注册用户自动成为管理员
+    </div>
+    <a class="back-home" href="/">← 返回首页</a>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+const q = new URLSearchParams(location.search);
+const redirect = (q.get("redirect") && !q.get("redirect").includes("login.html")) ? q.get("redirect") : "/";
+let mode = q.get("mode") === "register" ? "register" : "login";
+
+/* 已登录则直接跳走 */
+if (Store.token && Store.user) {
+  location.replace(redirect);
+}
+
+const title = document.querySelector(".auth-card h1");
+const sub = document.getElementById("auth-sub");
+const user = document.getElementById("auth-user");
+const pass = document.getElementById("auth-pass");
+const pass2 = document.getElementById("auth-pass2");
+const err = document.getElementById("auth-err");
+const submit = document.getElementById("auth-submit");
+const sw = document.getElementById("auth-switch");
+
+function setMode(m) {
+  mode = m;
+  title.textContent = m === "login" ? "欢 迎 回 来" : "注 册";
+  sub.textContent = m === "login" ? "登录后继续赚积分冲排行！" : "新用户注册即送 100 积分";
+  pass2.style.display = m === "register" ? "" : "none";
+  submit.textContent = m === "login" ? "登 录" : "注 册";
+  sw.textContent = m === "login" ? "没有账号？去注册" : "已有账号？去登录";
+  err.textContent = "";
+  pass.value = "";
+  pass2.value = "";
+  user.focus();
+}
+
+sw.onclick = () => setMode(mode === "login" ? "register" : "login");
+
+async function doAuth() {
+  const u = user.value.trim();
+  const p = pass.value;
+  err.textContent = "";
+  if (!u || !p) { err.textContent = "请填写昵称和密码"; return; }
+  if (mode === "register" && p !== pass2.value) { err.textContent = "两次密码不一致"; return; }
+  submit.disabled = true;
+  submit.textContent = mode === "login" ? "登录中…" : "注册中…";
+  try {
+    const r = mode === "login" ? await Api.login(u, p) : await Api.register(u, p);
+    Store.token = r.token;
+    Store.user = r.user;
+    toast(r.msg || (mode === "login" ? "登录成功" : "注册成功"), "ok");
+    location.href = redirect;
+  } catch (e) {
+    err.textContent = e.message;
+    submit.disabled = false;
+    submit.textContent = mode === "login" ? "登 录" : "注 册";
+  }
+}
+
+submit.onclick = doAuth;
+[user, pass, pass2].forEach(el => el.addEventListener("keydown", e => {
+  if (e.key === "Enter") doAuth();
+}));
+
+setMode(mode);
+user.focus();
+</script>
+</body>
+</html>

@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>音乐游戏 8键 3D</title>
+<link rel="stylesheet" href="/css/style.css">
+<script type="importmap">
+  { "imports": { "three": "/js/three.module.min.js" } }
+</script>
+</head>
+<body>
+<div class="game-wrap">
+  <div class="three-box">
+    <div class="three-hud">
+      <span class="stat">🎵 得分 <b id="hud-score">0</b></span>
+      <span class="stat">🔥 连击 <b id="hud-combo">0</b></span>
+      <span class="stat">🎯 判定 <b id="hud-judge" style="color:var(--gold)">-</b></span>
+      <span class="stat">精准 <b id="hud-acc">100%</b></span>
+    </div>
+    <div id="stage"></div>
+    <div style="position:absolute;bottom:14px;left:0;right:0;display:flex;justify-content:center;z-index:6">
+      <button class="btn" id="btn-start" style="font-size:17px;padding:12px 34px">▶ 开始演奏</button>
+    </div>
+    <div class="key-hint" style="position:absolute;bottom:80px;left:0;right:0;z-index:6">
+      <kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><kbd>F</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd><kbd>;</kbd>
+    </div>
+  </div>
+
+  <div class="game-panel">
+    <h2>📖 玩法</h2>
+    <p style="color:var(--muted);line-height:2">
+      音符从 3D 深处向你飞来，到达判定线时按下对应按键。<b style="color:var(--ok)">Perfect +100</b> · <b style="color:var(--gold)">Good +60</b> · 漏掉算 Miss。<br>
+      连击越高单次得分越高（最高 2 倍）。谱面由<b style="color:var(--accent2)">服务器随机生成</b>，防篡改防重放，约 80 秒一首。
+    </p>
+  </div>
+  <div class="game-panel">
+    <h2>🏆 节奏排行榜</h2>
+    <ul class="rank-list" id="rank-list"></ul>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script type="module">
+import * as THREE from "three";
+
+gameShell("🎹 音乐游戏 · 8键 3D");
+initTopBar();
+
+/* ================= 场景 ================= */
+const stage = document.getElementById("stage");
+const W_VIEW = 860, H_VIEW = 520;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0e1e);
+scene.fog = new THREE.Fog(0x0b0e1e, 30, 70);
+const camera = new THREE.PerspectiveCamera(62, W_VIEW / H_VIEW, 0.1, 200);
+camera.position.set(0, 5.5, 8);
+camera.lookAt(0, 3, -20);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(W_VIEW, H_VIEW);
+stage.appendChild(renderer.domElement);
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const keyLight = new THREE.PointLight(0xffffff, 1, 60);
+keyLight.position.set(0, 20, 10);
+scene.add(keyLight);
+
+/* 星尘背景 */
+{
+  const n = 400;
+  const pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    pos[i * 3] = (Math.random() - 0.5) * 90;
+    pos[i * 3 + 1] = (Math.random() - 0.5) * 40;
+    pos[i * 3 + 2] = -10 - Math.random() * 70;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color: 0x8b93b8, size: 0.25, transparent: true, opacity: .8 })));
+}
+
+const LANES = 8;
+const COLORS = [0xff6b6b, 0xffa94d, 0xffd43b, 0x69db7c, 0x4dabf7, 0x9775fa, 0xf783ac, 0x63e6be];
+const LANE_W = 7.6;
+const KEYS = ["KeyA", "KeyS", "KeyD", "KeyF", "KeyJ", "KeyK", "KeyL", "Semicolon"];
+
+/* 音轨平面 + 判定线 */
+const lanes3d = [];
+for (let i = 0; i < LANES; i++) {
+  const x = (i - 3.5) * LANE_W;
+  const mat = new THREE.MeshStandardMaterial({
+    color: COLORS[i], emissive: COLORS[i], emissiveIntensity: 0.25, transparent: true, opacity: 0.28 });
+  const plane = new THREE.Mesh(new THREE.PlaneGeometry(LANE_W - 0.7, 60), mat);
+  plane.position.set(x, 3, -30);
+  scene.add(plane);
+  lanes3d.push(plane);
+}
+const hitLine = new THREE.Mesh(new THREE.BoxGeometry(LANES * LANE_W, 0.35, 0.35),
+  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.75 }));
+hitLine.position.set(0, 0.25, -1.2);
+scene.add(hitLine);
+const glowRing = new THREE.Mesh(new THREE.TorusGeometry(3.2, 0.14, 8, 48),
+  new THREE.MeshBasicMaterial({ color: 0xffd54f, transparent: true, opacity: 0.9, depthWrite: false }));
+glowRing.rotation.x = Math.PI / 2;
+glowRing.position.set(0, 0.2, -1.2);
+glowRing.visible = false;
+scene.add(glowRing);
+
+/* 粒子爆发 */
+function makeBurst(n, color) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+  const mat = new THREE.PointsMaterial({ color, size: 0.5, transparent: true, opacity: 0, depthWrite: false });
+  const pts = new THREE.Points(geo, mat);
+  scene.add(pts);
+  return { pts, geo, mat, vels: new Float32Array(n * 3), life: 0 };
+}
+const burst = makeBurst(50, 0xffd54f);
+function burstAt(x, y, z, color) {
+  burst.mat.color.setHex(color);
+  burst.life = 1;
+  for (let i = 0; i < 50; i++) {
+    burst.pts.geometry.attributes.position.array[i * 3] = x;
+    burst.pts.geometry.attributes.position.array[i * 3 + 1] = y;
+    burst.pts.geometry.attributes.position.array[i * 3 + 2] = z;
+    const a = Math.random() * Math.PI * 2;
+    burst.vels[i * 3] = Math.cos(a) * 8;
+    burst.vels[i * 3 + 1] = 3 + Math.random() * 8;
+    burst.vels[i * 3 + 2] = (Math.random() - 0.5) * 4;
+  }
+  burst.pts.geometry.attributes.position.needsUpdate = true;
+}
+
+/* ================= 音频 ================= */
+let audioCtx = null;
+function beep(freq, dur = 0.08, vol = 0.2, when = 0) {
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = "square";
+  o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, audioCtx.currentTime + when);
+  g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + when + dur);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(audioCtx.currentTime + when);
+  o.stop(audioCtx.currentTime + when + dur);
+}
+function scheduleBeat(bpm) {
+  const beat = 60 / bpm;
+  let t = 0;
+  while (t < 82) {
+    beep(60, 0.06, 0.35, t - 0.2);
+    beep(1400, 0.03, 0.05, t + beat / 2 - 0.2);
+    beep(1400, 0.03, 0.05, t + beat / 2 + beat / 4 - 0.2);
+    t += beat;
+  }
+}
+
+/* ================= 游戏状态 ================= */
+const BPM = 132;
+let chart = [];
+let noteMeshes = new Map();  // note.t -> mesh
+let running = false, over = false, submitted = false;
+let songStart = 0, score = 0, combo = 0, maxCombo = 0, perfects = 0, goods = 0, misses = 0, total = 0;
+let judgeText = null;
+let gameToken = "", maxScore = 0;
+const APPROACH = 1.9;
+const SPAWN_Z = -58, HIT_Z = -1.2;
+
+function startGame() {
+  if (!requireLogin()) return;
+  submitted = false;
+  Api.gameStart("rhythm").then(r => {
+    chart = r.chart;
+    gameToken = r.token;
+    maxScore = r.max_score;
+    noteMeshes.forEach(m => scene.remove(m));
+    noteMeshes.clear();
+    score = 0; combo = 0; maxCombo = 0; perfects = 0; goods = 0; misses = 0; total = 0;
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    songStart = audioCtx.currentTime + 0.4;
+    scheduleBeat(BPM);
+    running = true; over = false;
+    document.getElementById("btn-start").disabled = true;
+    toast(`🎵 谱面音符 ${chart.length} 个，出发！`, "ok");
+    hud();
+  }).catch(e => toast(e.message, "err"));
+}
+
+/* ================= 判定 ================= */
+function judge(keyIdx) {
+  if (!running || over) return;
+  const now = audioCtx.currentTime - songStart;
+  const cand = chart.filter(n => !n.hit && n.lane === keyIdx && Math.abs(n.t - now) < 0.3);
+  if (!cand.length) return;
+  const n = cand.reduce((a, b) => Math.abs(a.t - now) < Math.abs(b.t - now) ? a : b);
+  const dt = n.t - now;
+  if (Math.abs(dt) < 0.06) hitNote(n, "Perfect", 100, 0x43e97b, "#43e97b");
+  else if (Math.abs(dt) < 0.16) hitNote(n, "Good", 60, 0xffc94d, "#ffc94d");
+  else if (dt > 0.16) return;
+  else missNote(n);
+}
+
+function hitNote(n, label, base, hex, css) {
+  n.hit = true;
+  score += Math.round(base * (1 + Math.min(combo, 100) / 100));
+  combo++; maxCombo = Math.max(maxCombo, combo);
+  total++;
+  label === "Perfect" ? perfects++ : goods++;
+  const x = (n.lane - 3.5) * LANE_W;
+  burstAt(x, 1, HIT_Z, hex);
+  const m = noteMeshes.get(n.t);
+  if (m) m.userData.burst = 1;
+  lanes3d[n.lane].material.emissiveIntensity = 1.4;
+  setTimeout(() => { if (lanes3d[n.lane]) lanes3d[n.lane].material.emissiveIntensity = 0.25; }, 120);
+  glowRing.visible = true;
+  glowRing.scale.setScalar(1);
+  glowRing.position.x = x;
+  setTimeout(() => glowRing.visible = false, 140);
+  judgeText = { label, color: css, t: performance.now() };
+  beep(440 + n.lane * 60, 0.09, 0.25);
+  hud();
+}
+
+function missNote(n) {
+  n.hit = true;
+  combo = 0; misses++; total++;
+  judgeText = { label: "Miss", color: "#ff5d6c", t: performance.now() };
+  hud();
+}
+
+/* ================= 主循环 ================= */
+const clock = new THREE.Clock();
+let camT = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, clock.getDelta() || 0.016);
+  camT += dt;
+  camera.position.x = Math.sin(camT * 0.3) * 1.2;
+  camera.position.y = 5.5 + Math.sin(camT * 0.5) * 0.4;
+  camera.lookAt(0, 3, -20);
+
+  if (running && audioCtx) {
+    const now = audioCtx.currentTime - songStart;
+    if (now > 82) { finish(); }
+    chart.forEach(n => {
+      if (!n.hit && n.t < now - 0.2) missNote(n);
+      if (n.hit) return;
+      const toHit = n.t - now;
+      if (toHit < -0.3 || toHit > APPROACH + 1) return;
+      let mesh = noteMeshes.get(n.t);
+      if (!mesh) {
+        mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.75),
+          new THREE.MeshStandardMaterial({
+            color: COLORS[n.lane], emissive: COLORS[n.lane],
+            emissiveIntensity: 0.8, metalness: .3, roughness: .3 }));
+        mesh.position.x = (n.lane - 3.5) * LANE_W;
+        mesh.position.y = 1;
+        mesh.position.z = SPAWN_Z;
+        scene.add(mesh);
+        noteMeshes.set(n.t, mesh);
+      }
+      const p = 1 - toHit / APPROACH;
+      mesh.position.z = SPAWN_Z + (HIT_Z - SPAWN_Z) * p;
+      mesh.rotation.x += dt * 4;
+      mesh.rotation.y += dt * 3;
+      const s = 1 + Math.min(0.5, (1 - p) * 0.4);
+      mesh.scale.setScalar(s);
+      if (mesh.userData.burst) {
+        mesh.userData.burst -= dt * 3;
+        mesh.scale.setScalar(2.4);
+        if (mesh.userData.burst <= 0) {
+          scene.remove(mesh);
+          noteMeshes.delete(n.t);
+        }
+      }
+    });
+  }
+
+  if (burst.life > 0) {
+    burst.life -= dt;
+    burst.mat.opacity = Math.max(0, burst.life);
+    const arr = burst.pts.geometry.attributes.position.array;
+    for (let i = 0; i < arr.length; i += 3) {
+      arr[i] += burst.vels[i] * dt;
+      arr[i + 1] += burst.vels[i + 1] * dt;
+      arr[i + 2] += burst.vels[i + 2] * dt;
+      burst.vels[i + 1] -= 14 * dt;
+    }
+    burst.pts.geometry.attributes.position.needsUpdate = true;
+  } else {
+    burst.mat.opacity = 0;
+  }
+
+  if (glowRing.visible) {
+    const k = 1 + dt * 6;
+    glowRing.scale.setScalar(Math.min(k, 4));
+    glowRing.material.opacity = Math.max(0, glowRing.material.opacity - dt * 3);
+  }
+
+  renderer.render(scene, camera);
+  if (over) hud();
+}
+
+/* ================= 结算 ================= */
+function finish() {
+  if (submitted) return;
+  submitted = true;
+  running = false; over = true;
+  document.getElementById("btn-start").disabled = false;
+  Api.gameEnd("rhythm", gameToken, score, { perfect: perfects, good: goods, miss: misses })
+    .then(r => toast(r.is_best ? `🎉 新纪录 ${r.earned} 分！` : `已结算 +${r.earned} 分`, "ok"))
+    .catch(e => toast(e.message, "err"))
+    .finally(() => { refreshPoints(); refreshRank(); });
+  judgeText = { label: "曲终", color: "#ffc94d", t: performance.now() };
+}
+
+function hud() {
+  document.getElementById("hud-score").textContent = score;
+  document.getElementById("hud-combo").textContent = combo;
+  document.getElementById("hud-judge").textContent = judgeText ? judgeText.label : "-";
+  document.getElementById("hud-acc").textContent = total ? Math.round((perfects + goods * 0.6) / total * 100) + "%" : "100%";
+}
+
+/* ================= 输入 ================= */
+document.addEventListener("keydown", e => {
+  const i = KEYS.indexOf(e.code);
+  if (i >= 0) {
+    e.preventDefault();
+    judge(i);
+  }
+});
+
+async function refreshRank() {
+  try { await renderLeaderboard(document.getElementById("rank-list"), { type: "score", game: "rhythm" }); } catch (e) {}
+}
+
+document.getElementById("btn-start").addEventListener("click", startGame);
+
+/* 判定文字浮层 */
+setInterval(() => {
+  const el = document.querySelector(".judge-float");
+  if (el && performance.now() - judgeText.t > 500) el.remove();
+  if (judgeText && performance.now() - judgeText.t < 500) {
+    if (!el) {
+      const d = document.createElement("div");
+      d.className = "judge-float";
+      document.querySelector(".three-box").appendChild(d);
+      d.textContent = judgeText.label;
+      d.style.color = judgeText.color;
+    }
+  }
+}, 80);
+
+animate();
+refreshRank();
+</script>
+</body>
+</html>

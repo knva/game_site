@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日签到</title>
+<link rel="stylesheet" href="/css/style.css">
+<style>
+.checkin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 12px; }
+.ci-day {
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 14px;
+  padding: 14px 10px; text-align: center; position: relative;
+}
+.ci-day .d { font-size: 13px; color: var(--muted); }
+.ci-day .w { font-size: 12px; color: var(--muted); margin: 2px 0; }
+.ci-day .r { font-size: 20px; font-weight: 800; color: var(--gold); }
+.ci-day.today { border-color: var(--accent2); box-shadow: 0 0 18px rgba(255, 122, 217, .35); }
+.ci-day.checked { border-color: var(--ok); }
+.ci-day.checked .r { color: var(--ok); }
+.ci-day.bonus { background: linear-gradient(160deg, rgba(255,201,77,.18), var(--panel2)); }
+.ci-day .tag-x { font-size: 11px; color: var(--ok); }
+.vip-plan {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; margin-bottom: 10px;
+}
+.vip-plan .vp-name { font-weight: 700; }
+.vip-plan .vp-price { color: var(--gold); font-weight: 700; font-size: 18px; }
+</style>
+</head>
+<body>
+<div class="game-wrap">
+  <div class="game-panel">
+    <div class="hud">
+      <span class="stat">🔥 连续签到 <b id="hud-streak" class="big">0</b> 天</span>
+      <span class="stat">💰 余额 <b id="hud-points" class="big">-</b></span>
+      <span class="stat">👑 VIP <b id="hud-vip">未开通</b></span>
+      <span style="flex:1"></span>
+      <button class="btn" id="btn-checkin">📅 立即签到</button>
+    </div>
+  </div>
+
+  <div class="game-panel">
+    <h2>📅 未来 7 天签到收益 <span class="sub">连续 7 天起开始加成，单日最高 120 分</span></h2>
+    <div class="checkin-grid" id="ci-grid"></div>
+  </div>
+
+  <div class="game-panel" id="makeup-panel" style="display:none">
+    <h2>🛠 补签（VIP 专属，150 积分/次）</h2>
+    <div class="checkin-grid" id="makeup-grid"></div>
+  </div>
+
+  <div class="layout" style="max-width:none;padding:0">
+    <div class="game-panel" style="flex:1;margin-top:16px">
+      <h2>👑 VIP 特权</h2>
+      <div class="vip-plan">
+        <div><div class="vp-name">半月 VIP</div><div style="color:var(--muted);font-size:12px">有效期 15 天</div></div>
+        <div class="vp-price">1500 💎</div>
+        <button class="btn mini" data-days="15">开通</button>
+      </div>
+      <div class="vip-plan">
+        <div><div class="vp-name">月度 VIP</div><div style="color:var(--muted);font-size:12px">有效期 30 天，更划算</div></div>
+        <div class="vp-price">3000 💎</div>
+        <button class="btn mini" data-days="30">开通</button>
+      </div>
+      <p style="color:var(--muted);font-size:13px;line-height:1.9">
+        👑 VIP 特权：<b style="color:var(--ok)">补签</b>（150分/次，补最近7天）、签到收益 <b style="color:var(--ok)">+20%</b>、
+        漂流瓶每日多扔 <b style="color:var(--ok)">1</b> 个、顶栏专属徽章。
+      </p>
+    </div>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+gameShell("📅 每日签到");
+initTopBar();
+
+const WEEK = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+let st = null;
+
+async function load() {
+  if (!requireLogin()) return;
+  try {
+    st = await Api.checkinStatus();
+    const { user } = await Api.me();
+    document.getElementById("hud-streak").textContent = st.streak;
+    document.getElementById("hud-points").textContent = user.points;
+    document.getElementById("hud-vip").textContent = st.is_vip ? `已开通（剩${st.vip_remaining_days}天）` : "未开通";
+    document.getElementById("hud-vip").style.color = st.is_vip ? "var(--gold)" : "var(--muted)";
+    document.getElementById("btn-checkin").disabled = st.today_checked;
+    document.getElementById("btn-checkin").textContent = st.today_checked ? "✅ 今日已签到" : "📅 立即签到";
+    renderGrid();
+    renderMakeup();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function renderGrid() {
+  const box = document.getElementById("ci-grid");
+  box.innerHTML = st.future.map(f => {
+    const d = new Date(f.day + "T00:00:00");
+    const isToday = f.day === new Date().toISOString().slice(0, 10);
+    const bonus = f.reward >= 25;
+    return `<div class="ci-day ${isToday ? "today" : ""} ${f.checked ? "checked" : ""} ${bonus && !f.checked ? "bonus" : ""}">
+      <div class="d">${f.day.slice(5)}</div>
+      <div class="w">${WEEK[d.getDay()]}</div>
+      ${f.checked ? '<div class="r">已签</div>' : `<div class="r">${f.reward}</div>`}
+      ${f.checked ? '<div class="tag-x">✓</div>' : (bonus ? '<div class="tag-x">🔥加成</div>' : "")}
+    </div>`;
+  }).join("");
+}
+
+function renderMakeup() {
+  const panel = document.getElementById("makeup-panel");
+  if (!st.makeup.length) { panel.style.display = "none"; return; }
+  panel.style.display = "";
+  document.getElementById("makeup-grid").innerHTML = st.makeup.map(m => `
+    <div class="ci-day">
+      <div class="d">${m.day.slice(5)}</div>
+      <div class="w">${WEEK[new Date(m.day + "T00:00:00").getDay()]}</div>
+      <div class="r">${m.reward}</div>
+      <div style="color:var(--muted);font-size:12px">补签 ${m.cost}💎</div>
+      <button class="mini-btn" style="margin-top:6px;padding:5px 12px;border-radius:8px;background:var(--accent);border:none;color:#fff;cursor:pointer" data-day="${m.day}">补签</button>
+    </div>`).join("");
+  document.querySelectorAll("[data-day]").forEach(btn => {
+    btn.onclick = async () => {
+      if (!st.is_vip) { toast("只有 VIP 才能补签，先开通 VIP 吧！", "err"); return; }
+      try {
+        const r = await Api.checkinMakeup(btn.dataset.day);
+        toast("补签成功，连续签到已恢复", "ok");
+        refreshPoints();
+        load();
+      } catch (e) { toast(e.message, "err"); }
+    };
+  });
+}
+
+document.getElementById("btn-checkin").onclick = async () => {
+  try {
+    const r = await Api.checkin();
+    toast(`🎉 签到成功 +${r.reward} 分（连续第 ${r.streak} 天）`, "ok");
+    refreshPoints();
+    load();
+  } catch (e) { toast(e.message, "err"); }
+};
+
+document.querySelectorAll("[data-days]").forEach(btn => {
+  btn.onclick = async () => {
+    if (!requireLogin()) return;
+    try {
+      const r = await Api.vipBuy(+btn.dataset.days);
+      toast(`👑 开通成功，有效期 ${r.days} 天`, "ok");
+      refreshPoints();
+      load();
+    } catch (e) { toast(e.message, "err"); }
+  };
+});
+
+window.onAuthChange = () => load();
+load();
+</script>
+</body>
+</html>

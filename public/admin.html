@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>管理后台</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="game-wrap">
+  <div class="game-panel">
+    <h2>📊 平台统计</h2>
+    <div class="stat-cards" id="stat-cards"></div>
+  </div>
+
+  <div class="game-panel">
+    <h2>👥 用户管理 <span class="sub">搜索昵称 · 调整余额 · 封禁/解封</span></h2>
+    <div class="toolbar">
+      <input id="u-search" placeholder="搜索昵称" style="flex:1">
+      <button class="btn mini" onclick="loadUsers()">搜索</button>
+    </div>
+    <table class="tbl"><thead>
+      <tr><th>ID</th><th>昵称</th><th>余额</th><th>角色</th><th>状态</th><th>注册时间</th><th>操作</th></tr>
+    </thead><tbody id="u-tbody"></tbody></table>
+    <div class="pager" id="u-pager"></div>
+  </div>
+
+  <div class="game-panel">
+    <h2>📮 系统公告（站内信群发）</h2>
+    <div class="toolbar">
+      <input id="a-to" placeholder="收件人昵称">
+      <input id="a-title" placeholder="标题" style="flex:1">
+    </div>
+    <textarea id="a-content" placeholder="公告内容…" style="width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:10px;padding:10px;font-size:14px;min-height:70px;outline:none"></textarea>
+    <button class="btn mini" id="a-send" style="margin-top:8px">发送</button>
+  </div>
+
+  <div class="game-panel">
+    <h2>🗒 操作日志</h2>
+    <div class="toolbar">
+      <input id="l-user" placeholder="按用户筛选">
+      <select id="l-action">
+        <option value="">全部操作</option>
+        <option value="register">注册</option>
+        <option value="login">登录</option>
+        <option value="logout">登出</option>
+        <option value="checkin">签到</option>
+        <option value="game_award">游戏奖励</option>
+        <option value="goldminer_ticket">矿工门票</option>
+        <option value="farm_buy">买种子</option>
+        <option value="farm_sell">出售作物</option>
+        <option value="farm_harvest">收获</option>
+        <option value="farm_unlock">开地</option>
+        <option value="farm_upgrade">地块升级</option>
+        <option value="building_upgrade">建筑升级</option>
+        <option value="farm_steal">偷菜</option>
+        <option value="wheel_spin">转盘</option>
+        <option value="slot_spin">老虎机</option>
+        <option value="slot_double">翻倍</option>
+        <option value="slot_win">老虎机领取</option>
+        <option value="vip_buy">开通VIP</option>
+        <option value="bottle_throw">扔漂流瓶</option>
+        <option value="bottle_pick">捡漂流瓶</option>
+        <option value="mail_send">发信</option>
+        <option value="admin_balance">管理员调余额</option>
+        <option value="admin_op">管理员操作</option>
+      </select>
+      <button class="btn mini" onclick="loadLogs()">查询</button>
+    </div>
+    <table class="tbl"><thead>
+      <tr><th>时间</th><th>用户</th><th>操作</th><th>详情</th><th>金额</th><th>IP</th></tr>
+    </thead><tbody id="l-tbody"></tbody></table>
+    <div class="pager" id="l-pager"></div>
+  </div>
+
+  <div class="game-panel">
+    <h2>🍾 漂流瓶管理</h2>
+    <ul class="bottle-feed" id="b-feed"></ul>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+gameShell("🛠 管理后台", false);
+initTopBar();
+
+const ACTIONS = { register: "注册", login: "登录", logout: "登出", checkin: "签到", checkin_makeup: "补签",
+  vip_buy: "开通VIP", game_start: "开局", game_end: "游戏结算", game_award: "游戏奖励", goldminer_ticket: "矿工门票",
+  farm_buy: "买种子", farm_sell: "出售", farm_harvest: "收获", farm_unlock: "开地", farm_upgrade: "地块升级",
+  building_upgrade: "建筑升级", farm_steal: "偷菜", wheel_spin: "转盘", slot_spin: "老虎机", slot_double: "翻倍",
+  slot_win: "老虎机领取", bottle_throw: "扔瓶", bottle_pick: "捡瓶", mail_send: "发信", admin_balance: "调余额",
+  admin_mail: "系统信件", admin_op: "管理员操作", gomoku_create: "建房间", gomoku_join: "加入", gomoku_move: "落子",
+  gomoku_award: "五子棋奖励" };
+
+async function loadStats() {
+  try {
+    const s = await Api.adminStats();
+    document.getElementById("stat-cards").innerHTML = [
+      ["👥", s.users, "注册用户"], ["💎", s.points_total, "流通积分"], ["🎮", s.scores, "游戏记录"],
+      ["📝", s.logs, "日志条数"], ["🍾", s.bottles, "漂流瓶"], ["📬", s.mail, "站内信"],
+      ["📈", s.earned_today, "今日发放积分"],
+    ].map(([e, v, k]) => `<div class="stat-card"><div class="v">${e} ${v}</div><div class="k">${k}</div></div>`).join("");
+  } catch (e) { toast(e.message, "err"); }
+}
+
+let upage = 1;
+async function loadUsers() {
+  try {
+    const search = document.getElementById("u-search").value.trim();
+    const d = await Api.adminUsers(search, upage);
+    document.getElementById("u-tbody").innerHTML = d.list.map(u => `
+      <tr>
+        <td>${u.id}</td><td>${escapeHtml(u.username)}</td><td class="num">${u.points}</td>
+        <td>${u.role === "admin" ? "👑管理员" : "玩家"}</td>
+        <td style="color:${u.status === "active" ? "var(--ok)" : "var(--bad)"}">${u.status === "active" ? "正常" : "封禁"}</td>
+        <td class="mono">${fmtTime(u.created_at)}</td>
+        <td style="white-space:nowrap">
+          <button class="mini-btn" onclick="setBalance(${u.id}, '${escapeHtml(u.username)}')">调余额</button>
+          <button class="mini-btn" onclick="toggleUser(${u.id})">${u.status === "active" ? "封禁" : "解封"}</button>
+        </td>
+      </tr>`).join("");
+    document.getElementById("u-pager").innerHTML =
+      `<button class="btn mini gray" onclick="upage--;loadUsers()" ${upage <= 1 ? "disabled" : ""}>上一页</button>
+       <span>第 ${d.page} 页 · 共 ${d.total} 人</span>
+       <button class="btn mini gray" onclick="upage++;loadUsers()">下一页</button>`;
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function setBalance(uid, name) {
+  const amount = prompt(`给 ${name} 调整余额（正数加钱，负数扣钱）：`, "100");
+  if (amount === null) return;
+  const note = prompt("备注：", "后台调整");
+  Api.adminSetBalance(uid, parseInt(amount) || 0, note || "")
+    .then(() => { toast("调整成功", "ok"); loadUsers(); })
+    .catch(e => toast(e.message, "err"));
+}
+function toggleUser(uid) {
+  Api.adminToggle(uid)
+    .then(() => { toast("已操作", "ok"); loadUsers(); })
+    .catch(e => toast(e.message, "err"));
+}
+
+document.getElementById("a-send").onclick = () => {
+  Api.adminMail(
+    document.getElementById("a-to").value.trim(),
+    document.getElementById("a-title").value.trim(),
+    document.getElementById("a-content").value.trim())
+    .then(() => toast("公告已发送", "ok"))
+    .catch(e => toast(e.message, "err"));
+};
+
+let lpage = 1;
+async function loadLogs() {
+  try {
+    const d = await Api.adminLogs(
+      document.getElementById("l-user").value.trim(),
+      document.getElementById("l-action").value, lpage);
+    document.getElementById("l-tbody").innerHTML = d.list.map(l => `
+      <tr>
+        <td class="mono">${fmtTime(l.at)}</td>
+        <td>${escapeHtml(l.username || "-")}</td>
+        <td>${ACTIONS[l.action] || l.action}</td>
+        <td>${escapeHtml(l.detail || "")}</td>
+        <td class="num">${l.amount ?? "-"}</td>
+        <td class="mono">${l.ip}</td>
+      </tr>`).join("");
+    document.getElementById("l-pager").innerHTML =
+      `<button class="btn mini gray" onclick="lpage--;loadLogs()" ${lpage <= 1 ? "disabled" : ""}>上一页</button>
+       <span>第 ${d.page} 页 · 共 ${d.total} 条</span>
+       <button class="btn mini gray" onclick="lpage++;loadLogs()">下一页</button>`;
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function loadBottles() {
+  try {
+    const { list } = await Api.adminBottles();
+    document.getElementById("b-feed").innerHTML = list.length
+      ? list.map(b => `<li class="bottle-item">
+          <div class="b-meta">#${b.id} ${escapeHtml(b.username)} · ${fmtTime(b.created_at)} · 被捡:${b.picked ? escapeHtml(b.picked_by) : "否"} · 👀${b.views}
+          <button class="mini-btn" style="float:right" onclick="delBottle(${b.id})">删除</button></div>
+          <div class="b-content">"${escapeHtml(b.content)}"</div>
+        </li>`).join("")
+      : `<li class="bottle-item">暂无漂流瓶</li>`;
+  } catch (e) {}
+}
+function delBottle(id) {
+  Api.adminDelBottle(id).then(() => { toast("已删除", "ok"); loadBottles(); }).catch(e => toast(e.message, "err"));
+}
+
+(async () => {
+  try {
+    const { user } = await Api.me();
+    if (user.role !== "admin") { toast("无权限访问", "err"); location.href = "/"; return; }
+  } catch (e) { toast("请先登录", "err"); location.href = "/"; return; }
+  loadStats(); loadUsers(); loadLogs(); loadBottles();
+})();
+</script>
+</body>
+</html>

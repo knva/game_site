@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>水果老虎机</title>
+<link rel="stylesheet" href="/css/style.css">
+<style>
+/* ============ 8-BIT 风格 ============ */
+.pixel-font { font-family: "Courier New", monospace; font-weight: 900; letter-spacing: 1px; }
+.slot-machine {
+  background: #1a1030;
+  border: 4px solid #0a0618;
+  border-radius: 10px;
+  padding: 18px 22px 22px;
+  position: relative;
+  box-shadow:
+    inset 0 0 0 3px #3a2a5a,
+    inset 0 0 0 6px #241a40,
+    0 12px 0 #0a0618,
+    0 20px 40px rgba(0,0,0,.55);
+  image-rendering: pixelated;
+}
+/* CRT 扫描线 */
+.slot-machine::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: 8px;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0 2px, transparent 2px 4px);
+  z-index: 8;
+}
+.slot-title {
+  text-align: center; font-size: 22px; color: #ffe14d; letter-spacing: 3px;
+  text-shadow: 2px 2px 0 #b8860b, 4px 4px 0 #000;
+  margin-bottom: 14px; user-select: none;
+}
+.reels-wrap { display: flex; gap: 10px; justify-content: center; align-items: center; }
+.reel-box {
+  background: #060310; border: 4px solid #0a0618; border-radius: 6px; padding: 6px;
+  box-shadow: inset 0 0 0 2px #2a1f45, inset 0 8px 24px rgba(0,0,0,.8);
+}
+.reel-box canvas { display: block; image-rendering: pixelated; }
+/* 拉杆 */
+.lever-area { position: relative; width: 64px; height: 340px; flex-shrink: 0; }
+.lever-slot {
+  position: absolute; left: 20px; top: 14px; bottom: 10px; width: 24px;
+  background: #241a40; border: 3px solid #0a0618; border-radius: 8px;
+  box-shadow: inset 0 0 0 2px #3a2a5a;
+}
+.lever {
+  position: absolute; left: 6px; top: 8px; width: 52px; height: 300px; cursor: pointer;
+  transition: transform .14s cubic-bezier(.3, 0, .7, 1);
+  transform: translateY(0);
+  z-index: 2;
+}
+.lever.pulled { transform: translateY(128px); transition: transform .12s ease-in; }
+.lever .ball {
+  width: 46px; height: 46px; margin: 0 auto; border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #ff8a5c, #e8402a 55%, #7a1208);
+  border: 4px solid #2a0a04;
+  box-shadow: 0 6px 0 #4a0d05, inset 0 -6px 10px rgba(0,0,0,.4);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; color: #fff; user-select: none;
+}
+.lever .rod {
+  width: 14px; height: 250px; margin: 0 auto;
+  background: linear-gradient(90deg, #8a93a8, #d5dbe8 40%, #8a93a8);
+  border: 3px solid #3a4252; border-radius: 6px;
+  box-shadow: 0 4px 0 #2a3038;
+}
+.lever .base {
+  width: 44px; height: 12px; margin: -4px auto 0; border-radius: 4px;
+  background: #d5dbe8; border: 3px solid #3a4252;
+}
+.lever-hint { position: absolute; bottom: -4px; left: 0; right: 0; text-align: center; font-size: 11px; color: #9a8fc0; }
+/* 中奖行指示 */
+.payline {
+  position: absolute; left: 8%; right: 8%; top: 50%; height: 3px;
+  background: repeating-linear-gradient(90deg, #ffe14d 0 8px, transparent 8px 16px);
+  opacity: .7; z-index: 6; pointer-events: none;
+  box-shadow: 0 0 12px #ffe14d;
+}
+/* 结果 */
+.slot-result {
+  text-align: center; font-size: 18px; min-height: 30px; margin-top: 14px;
+  color: #ffe14d; letter-spacing: 2px; user-select: none;
+  text-shadow: 2px 2px 0 #000;
+}
+.paytable8 {
+  display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px;
+}
+.paytable8 span {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 13px;
+  background: #241a40; border: 2px solid #3a2a5a; border-radius: 6px; padding: 5px 10px;
+  color: #c8bff0; box-shadow: 2px 2px 0 #0a0618;
+}
+.paytable8 canvas { image-rendering: pixelated; }
+/* 按钮 8bit */
+.btn8 {
+  font-family: "Courier New", monospace; font-weight: 900; letter-spacing: 2px;
+  background: #e8402a; color: #fff; border: 3px solid #2a0a04; border-radius: 6px;
+  padding: 12px 28px; font-size: 16px; cursor: pointer;
+  box-shadow: 0 5px 0 #4a0d05, inset 0 -4px 0 rgba(0,0,0,.25);
+  text-shadow: 2px 2px 0 #000;
+  transition: transform .05s;
+}
+.btn8:hover { filter: brightness(1.1); }
+.btn8:active { transform: translateY(4px); box-shadow: 0 1px 0 #4a0d05; }
+.btn8:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+.btn8.gray { background: #4a4268; box-shadow: 0 5px 0 #241a40; }
+.btn8.green { background: #2ea84a; box-shadow: 0 5px 0 #0a4a1a; }
+.music-btn {
+  position: absolute; top: 10px; right: 12px; z-index: 9;
+  background: #241a40; border: 2px solid #3a2a5a; color: #ffe14d;
+  font-size: 15px; width: 38px; height: 34px; border-radius: 6px; cursor: pointer;
+  box-shadow: 2px 2px 0 #0a0618;
+}
+/* 翻倍弹窗 8bit */
+.modal8 {
+  position: fixed; inset: 0; z-index: 300; display: none; align-items: center; justify-content: center;
+  background: rgba(5,3,12,.8);
+}
+.modal8.show { display: flex; }
+.modal8 .box8 {
+  width: min(340px, 90vw); background: #1a1030; border: 4px solid #0a0618; border-radius: 10px;
+  padding: 26px; text-align: center;
+  box-shadow: inset 0 0 0 3px #3a2a5a, 0 24px 80px rgba(0,0,0,.7);
+}
+.modal8 .box8 h2 { color: #ffe14d; font-size: 20px; letter-spacing: 2px; text-shadow: 2px 2px 0 #000; margin-bottom: 14px; }
+.modal8 .coin8 { font-size: 52px; margin: 10px 0; animation: coin-flip .5s ease-in-out; }
+@keyframes coin-flip { 0% { transform: rotateY(0) scale(1); } 50% { transform: rotateY(180deg) scale(1.25); } 100% { transform: rotateY(360deg) scale(1); } }
+.modal8 .dm-text { font-size: 20px; color: #ffe14d; font-weight: 900; margin: 12px 0 18px; letter-spacing: 1px; }
+.modal8 .dm-btns { display: flex; gap: 10px; }
+.modal8 .dm-btns .btn8 { flex: 1; }
+.win-flash {
+  position: absolute; inset: 0; pointer-events: none; z-index: 7; border-radius: 8px;
+  background: radial-gradient(circle at 50% 45%, rgba(255,225,77,.55), transparent 60%);
+  animation: flash .5s ease-out; opacity: 0;
+}
+@keyframes flash { 0% { opacity: 1; } 100% { opacity: 0; } }
+</style>
+</head>
+<body>
+<div class="game-wrap">
+  <div class="game-panel" style="position:relative">
+    <div class="hud pixel-font">
+      <span class="stat">💰 余额 <b id="hud-points" class="big">-</b></span>
+      <span class="stat">每次 <b style="color:#ff6b5c">5 积分</b></span>
+      <span class="stat">今日剩余 <b id="hud-left" style="color:#ffe14d">-</b></span>
+      <span style="flex:1"></span>
+      <span class="stat" style="color:#9a8fc0">🛡️ 服务器判定 · 日赢上限 300</span>
+    </div>
+  </div>
+
+  <div class="game-panel" style="position:relative">
+    <div class="slot-machine">
+      <button class="music-btn" id="btn-music" title="音乐开关">🔊</button>
+      <div class="slot-title pixel-font">🎰 FRUIT SLOT 🎰</div>
+      <div class="reels-wrap">
+        <div class="reel-box" id="reel-0"></div>
+        <div class="reel-box" id="reel-1"></div>
+        <div class="reel-box" id="reel-2"></div>
+        <div class="lever-area">
+          <div class="lever-slot"></div>
+          <div class="lever" id="lever" title="拉杆！">
+            <div class="ball">🕹</div>
+            <div class="rod"></div>
+            <div class="base"></div>
+          </div>
+          <div class="lever-hint pixel-font">PULL!</div>
+        </div>
+      </div>
+      <div class="payline"></div>
+      <div class="slot-result pixel-font" id="result">PULL THE LEVER!</div>
+      <div class="paytable8" id="paytable"></div>
+      <div style="text-align:center;margin-top:14px">
+        <button class="btn8" id="btn-spin">🎰 PULL! (5💎)</button>
+      </div>
+      <div class="win-flash" id="win-flash"></div>
+    </div>
+  </div>
+
+  <div class="game-panel">
+    <h2>🎯 赔率(中线结算)</h2>
+    <p style="color:var(--muted);line-height:2">
+      三连水果按表格赔率支付;中列与左右任意一格相同按 <b style="color:var(--gold)">10 分</b> 支付。<br>
+      💎 宝石三连大奖 <b style="color:var(--gold)">300 分</b>!<br>
+      🎲 中奖后可「翻倍」:50% 概率奖金翻倍,50% 血本无归!也可随时「领取」。
+    </p>
+  </div>
+</div>
+
+<!-- 翻倍弹窗 -->
+<div class="modal8" id="double-modal">
+  <div class="box8">
+    <h2 class="pixel-font">🎉 WINNER!</h2>
+    <div class="coin8" id="dm-coin">🎰</div>
+    <div class="dm-text pixel-font" id="dm-text">奖金 10 💎</div>
+    <div class="dm-btns">
+      <button class="btn8" id="dm-double">🎲 翻倍(50%)</button>
+      <button class="btn8 gray" id="dm-collect">💰 领取</button>
+    </div>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+gameShell("🎰 水果老虎机");
+initTopBar();
+
+/* ============ 8-BIT 符号(现有图片降采样像素化) ============ */
+const IMGS = {
+  cherry: "/img/cherry.png", lemon: "/img/lemon.png", watermelon: "/img/watermelon.png",
+  grapes: "/img/grapes.png", strawberry: "/img/strawberry.png", orange: "/img/orange.png",
+  apple: "/img/apple.png", gem: "/img/gem.png",
+};
+const NAMES = {
+  cherry: "樱桃", lemon: "柠檬", watermelon: "西瓜", grapes: "葡萄",
+  strawberry: "草莓", orange: "橙子", apple: "苹果", gem: "宝石",
+};
+const SYMBOLS = Object.keys(IMGS);
+
+/* 预加载图片并像素化(降采样到 20x20 再放大,imageSmoothing off) */
+const pixCache = {};
+let imgsLoaded = 0;
+function loadSymbols(cb) {
+  let pending = SYMBOLS.length;
+  SYMBOLS.forEach(k => {
+    const img = new Image();
+    img.onload = () => {
+      const s = document.createElement("canvas");
+      s.width = 20; s.height = 20;
+      const g = s.getContext("2d");
+      g.drawImage(img, 0, 0, 20, 20);
+      pixCache[k] = s;
+      if (--pending === 0) cb();
+    };
+    img.onerror = () => { pixCache[k] = null; if (--pending === 0) cb(); };
+    img.src = IMGS[k];
+  });
+}
+
+/* ============ 滚轮 ============ */
+const REEL_H = 300, SYM = 88, ROWS = 3;   // 显示 3 个符号
+const reels = [];
+function buildReels() {
+  for (let i = 0; i < 3; i++) {
+    const box = document.getElementById("reel-" + i);
+    const cv = document.createElement("canvas");
+    cv.width = 110; cv.height = REEL_H;
+    box.appendChild(cv);
+    reels.push({ cv, ctx: cv.getContext("2d"), offset: 0, speed: 0, target: null, spinIdx: i });
+  }
+}
+function drawReel(r) {
+  const g = r.ctx;
+  g.clearRect(0, 0, 110, REEL_H);
+  g.imageSmoothingEnabled = false;
+  const step = SYM + 10;
+  const first = Math.floor(r.offset / step) - 1;
+  const y0 = -Math.floor(r.offset % step);
+  for (let row = first; row < first + ROWS + 3; row++) {
+    const idx = ((row % SYMBOLS.length) + SYMBOLS.length) % SYMBOLS.length;
+    const key = SYMBOLS[idx];
+    const y = y0 + row * step;
+    if (y > REEL_H || y + SYM < 0) continue;
+    if (pixCache[key]) {
+      g.drawImage(pixCache[key], 11, y, 88, 88);
+    } else {
+      g.fillStyle = "#241a40"; g.fillRect(11, y, 88, 88);
+      g.fillStyle = "#ffe14d"; g.font = "44px sans-serif"; g.textAlign = "center";
+      g.fillText("?", 55, y + 62);
+    }
+    /* 符号分隔线 */
+    g.fillStyle = "rgba(255,255,255,.06)";
+    g.fillRect(8, y + SYM + 2, 94, 3);
+  }
+  /* 槽位高亮 */
+  g.strokeStyle = "rgba(255,225,77,.25)";
+  g.lineWidth = 2;
+  g.strokeRect(4, REEL_H / 2 - SYM / 2 - 2, 102, SYM + 4);
+}
+
+/* ============ 8-BIT 音乐(WebAudio) ============ */
+let actx = null, musicOn = true, bgTimer = null, nextNote = 0, stepIdx = 0;
+function initAudio() {
+  if (actx) { if (actx.state === "suspended") actx.resume(); return; }
+  try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+}
+function tone(freq, dur, type = "square", vol = 0.12, when = 0) {
+  if (!actx || !musicOn) return;
+  const t = actx.currentTime + when;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.05);
+}
+/* 音效 */
+const sfx = {
+  lever: () => { [220, 180, 140, 110].forEach((f, i) => tone(f, .08, "square", .1, i * .045)); },
+  reel:  () => tone(880 + Math.random() * 300, .03, "square", .05),
+  stop:  () => tone(440, .06, "square", .12),
+  win:   () => [523, 659, 784, 1047].forEach((f, i) => tone(f, .12, "square", .13, i * .09)),
+  lose:  () => [330, 262, 196].forEach((f, i) => tone(f, .16, "sawtooth", .1, i * .12)),
+  dblWin: () => [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, .1, "square", .12, i * .07)),
+  dblLose: () => tone(110, .5, "sawtooth", .14),
+};
+/* 背景循环:Am-F-C-G 芯片音乐 */
+const BASS = [110, 87.3, 130.8, 98];
+const ARP = [220, 261.6, 329.6, 440, 523.3, 440, 329.6, 261.6];
+function scheduleBg() {
+  if (!actx || !musicOn) return;
+  const stepDur = 0.21;
+  while (nextNote < actx.currentTime + 0.6) {
+    const beat = Math.floor(stepIdx / 2) % 4;
+    tone(BASS[beat], stepDur * 0.9, "triangle", .09, nextNote - actx.currentTime);
+    if (stepIdx % 2 === 0) {
+      tone(ARP[(stepIdx * 3 + beat) % ARP.length], stepDur * 0.8, "square", .04, nextNote - actx.currentTime);
+    }
+    nextNote += stepDur;
+    stepIdx++;
+  }
+}
+function startBg() { if (!bgTimer) bgTimer = setInterval(scheduleBg, 200); }
+function stopBg() { clearInterval(bgTimer); bgTimer = null; }
+document.getElementById("btn-music").onclick = () => {
+  initAudio();
+  musicOn = !musicOn;
+  document.getElementById("btn-music").textContent = musicOn ? "🔊" : "🔇";
+  if (musicOn) { actx.resume(); startBg(); } else stopBg();
+};
+
+/* ============ 拉杆动画 ============ */
+const lever = document.getElementById("lever");
+function pullLever() {
+  lever.classList.add("pulled");
+  setTimeout(() => lever.classList.remove("pulled"), 260);
+  sfx.lever();
+}
+function leverSettle() {
+  lever.style.transition = "transform .5s cubic-bezier(.2,1.6,.4,1)";
+  lever.classList.remove("pulled");
+  setTimeout(() => { lever.style.transition = ""; }, 520);
+}
+
+/* ============ 游戏逻辑 ============ */
+let points = 0, spinning = false, payouts = {};
+let pendingToken = null, pendingAmount = 0, pendingDailyLeft = 300;
+let reelSpinT = 0;
+
+function renderPaytable() {
+  const box = document.getElementById("paytable");
+  box.innerHTML = "";
+  Object.entries(payouts).forEach(([k, v]) => {
+    const s = document.createElement("span");
+    const c = document.createElement("canvas");
+    c.width = 22; c.height = 22;
+    const g = c.getContext("2d");
+    if (pixCache[k]) { g.imageSmoothingEnabled = false; g.drawImage(pixCache[k], 1, 1, 20, 20); }
+    s.appendChild(c);
+    s.appendChild(document.createTextNode(`${NAMES[k]} ${v}分`));
+    box.appendChild(s);
+  });
+}
+
+function hud() {
+  document.getElementById("hud-points").textContent = points;
+  document.getElementById("hud-left").textContent = pendingDailyLeft;
+  document.getElementById("btn-spin").disabled = spinning || pendingToken !== null || points < 5;
+  document.getElementById("btn-spin").textContent = pendingToken !== null ? "⏳ 先领取或翻倍" : "🎰 PULL! (5💎)";
+  lever.style.pointerEvents = spinning || pendingToken !== null ? "none" : "auto";
+}
+
+function flashWin() {
+  const f = document.getElementById("win-flash");
+  f.style.animation = "none"; void f.offsetWidth;
+  f.style.animation = "";
+}
+
+/* 滚轮动画:reelSpin 阶段 */
+function startReels() {
+  spinning = true;
+  reelSpinT = 0;
+  reels.forEach(r => { r.speed = 1600 + Math.random() * 300; r.target = null; });
+  hud();
+}
+function updateReels(dt, finalReel) {
+  let allDone = true;
+  reels.forEach((r, i) => {
+    if (r.target === null) {
+      /* 转动中:偏移无限累加 */
+      r.offset += r.speed * dt;
+      if (reelSpinT > 0.8 + i * 0.55) {
+        /* 该列开始减速并锁定到目标 */
+        const targetIdx = SYMBOLS.indexOf(finalReel[i]);
+        const step = SYM + 10;
+        /* 让目标符号对齐中线:offset % step == 0 时第一行在顶部 */
+        const base = Math.floor(r.offset / step) * step;
+        r.target = base + targetIdx * step;
+        r.speed = 0;
+        sfx.stop();
+      } else {
+        sfx.reel();
+      }
+    } else {
+      /* 缓动到目标 */
+      const diff = r.target - r.offset;
+      if (Math.abs(diff) < 1) { r.offset = r.target; }
+      else r.offset += diff * Math.min(1, dt * 14);
+      if (Math.abs(r.target - r.offset) > 0.5) allDone = false;
+    }
+    drawReel(r);
+  });
+  if (reelSpinT > 0.8 + 2 * 0.55 && reels.every(r => Math.abs(r.target - r.offset) < 1)) {
+    return true;
+  }
+  return allDone && reels.every(r => r.target !== null) && allDone;
+}
+
+async function spin() {
+  if (!requireLogin()) return;
+  if (spinning || pendingToken !== null || points < 5) return;
+  initAudio(); startBg();
+  pullLever();
+  try {
+    const r = await Api.slotSpin();
+    points = r.points;
+    pendingDailyLeft = r.daily_left;
+    document.getElementById("result").textContent = "SPINNING...";
+    startReels();
+    /* 滚轮动画循环(逐列停止) */
+    await new Promise(res => {
+      let lastT = performance.now();
+      (function loop(now) {
+        const dt = Math.min(0.05, (now - lastT) / 1000);
+        lastT = now;
+        reelSpinT += dt;
+        const done = updateReels(dt, r.reel);
+        if (done) res();
+        else requestAnimationFrame(loop);
+      })(lastT);
+    });
+    leverSettle();
+    const mid = r.reel[1];
+    if (r.can_double && r.pay > 0) {
+      pendingToken = r.double_token;
+      pendingAmount = r.pay;
+      showDoubleModal();
+    } else if (r.pay > 0) {
+      document.getElementById("result").textContent = `★ WIN +${r.pay} ★`;
+      flashWin(); sfx.win();
+    } else {
+      document.getElementById("result").textContent = "NO LUCK...";
+      sfx.lose();
+    }
+    hud();
+    refreshPoints();
+  } catch (e) {
+    leverSettle();
+    document.getElementById("result").textContent = "-";
+    toast(e.message, "err");
+    hud();
+  }
+  spinning = false;
+  hud();
+}
+
+function showDoubleModal() {
+  document.getElementById("result").textContent = `★ WIN +${pendingAmount} ★`;
+  document.getElementById("dm-coin").textContent = "🎰";
+  document.getElementById("dm-text").textContent = `奖金 ${pendingAmount} 💎`;
+  document.getElementById("dm-double").disabled = false;
+  document.getElementById("dm-double").textContent = "🎲 翻倍(50%)";
+  document.getElementById("double-modal").classList.add("show");
+  sfx.win();
+}
+
+document.getElementById("lever").addEventListener("click", spin);
+document.getElementById("btn-spin").addEventListener("click", spin);
+
+document.getElementById("dm-double").onclick = async () => {
+  document.getElementById("dm-double").disabled = true;
+  try {
+    const r = await Api.slotDouble(pendingToken);
+    points = r.points;
+    if (r.win) {
+      pendingToken = r.token;
+      pendingAmount = r.pending;
+      document.getElementById("dm-coin").textContent = "🪙";
+      document.getElementById("dm-text").textContent = `翻倍成功!奖金 ${pendingAmount} 💎`;
+      document.getElementById("dm-double").textContent = "🎲 继续翻倍(50%)";
+      document.getElementById("dm-double").disabled = false;
+      sfx.dblWin();
+      flashWin();
+      toast(`翻倍成功!当前 ${pendingAmount}💎`, "ok");
+    } else {
+      pendingToken = null; pendingAmount = 0;
+      document.getElementById("dm-coin").textContent = "💥";
+      document.getElementById("dm-text").textContent = "翻倍失败,奖金泡汤 😭";
+      document.getElementById("dm-double").disabled = true;
+      sfx.dblLose();
+      setTimeout(() => { document.getElementById("double-modal").classList.remove("show"); }, 1500);
+      toast("翻倍失败…", "err");
+    }
+    hud(); refreshPoints();
+  } catch (e) { toast(e.message, "err"); }
+};
+
+document.getElementById("dm-collect").onclick = async () => {
+  if (!pendingToken) return;
+  try {
+    const r = await Api.slotCollect(pendingToken);
+    points = r.points;
+    pendingToken = null;
+    document.getElementById("double-modal").classList.remove("show");
+    document.getElementById("result").textContent = `💰 COLLECT +${r.pending}!`;
+    if (r.pending > 0) { flashWin(); sfx.win(); }
+    toast(`领取成功 +${r.pending}💎`, "ok");
+    hud(); refreshPoints();
+  } catch (e) { toast(e.message, "err"); }
+};
+
+(async () => {
+  buildReels();
+  loadSymbols(() => {
+    reels.forEach(drawReel);
+    renderPaytable();
+  });
+  if (Store.token) {
+    try {
+      const { user } = await Api.me();
+      points = user.points;
+    } catch (e) {}
+  }
+  hud();
+})();
+</script>
+</body>
+</html>

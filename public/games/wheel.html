@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>幸运大转盘</title>
+<link rel="stylesheet" href="/css/style.css">
+<style>
+/* ===== 转盘容器(正方形) ===== */
+.wheel-wrap { position: relative; width: 100%; max-width: 560px; margin: 0 auto; }
+.wheel-disc {
+  position: relative; width: 100%; height: 100%; border-radius: 50%;
+  background: conic-gradient(
+    #ff5252 0deg 45deg, #ffa726 45deg 90deg, #66bb6a 90deg 135deg,
+    #42a5f5 135deg 180deg, #ec407a 180deg 225deg, #ab47bc 225deg 270deg,
+    #ffca28 270deg 315deg, #90a4ae 315deg 360deg);
+  border: 8px solid #ffc94d;
+  box-sizing: border-box;
+  box-shadow: inset 0 0 0 3px rgba(255,255,255,.25), inset 0 0 40px rgba(0,0,0,.25), 0 10px 30px rgba(0,0,0,.5);
+}
+/* 扇区分隔线 */
+.wheel-disc::before {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  background: repeating-conic-gradient(rgba(0,0,0,.22) 0deg .5deg, transparent .5deg 45deg);
+}
+/* 扇区文字 */
+.wl {
+  position: absolute; transform: translate(-50%, -50%);
+  color: #fff; font-weight: 800; font-size: 20px; white-space: nowrap;
+  text-shadow: 0 2px 3px rgba(0,0,0,.9), 0 0 6px rgba(0,0,0,.6);
+  pointer-events: none; user-select: none; z-index: 2;
+}
+/* 中心圆钮 */
+.wheel-hub {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: 13%; height: 13%; border-radius: 50%; z-index: 3;
+  background: radial-gradient(circle at 35% 30%, #ffe9a8, #e8b93a 55%, #b8860b);
+  border: 3px solid #8a6200; box-shadow: 0 3px 10px rgba(0,0,0,.5);
+}
+/* 红色指针(顶部,指向盘心) */
+.wheel-pointer {
+  position: absolute; top: -2px; left: 50%; transform: translateX(-50%); z-index: 8;
+  width: 0; height: 0;
+  border-left: 15px solid transparent; border-right: 15px solid transparent;
+  border-top: 28px solid #ff1744;
+  filter: drop-shadow(0 2px 3px rgba(0,0,0,.6));
+  pointer-events: none;
+}
+.wheel-pointer::after {
+  content: ""; position: absolute; top: -36px; left: -12px;
+  width: 24px; height: 11px; background: #ff1744; border-radius: 4px;
+}
+/* 中心开始按钮(独立于转盘,不跟随旋转) */
+.spin-btn {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 9;
+  width: 18%; height: 18%; border-radius: 50%; border: none; cursor: pointer;
+  background: radial-gradient(circle at 35% 30%, #ffe9a8, #e8b93a 55%, #b8860b);
+  box-shadow: 0 4px 14px rgba(0,0,0,.55), inset 0 2px 4px rgba(255,255,255,.5);
+  color: #5a3d00; font-size: 26px; font-weight: 900;
+  display: flex; align-items: center; justify-content: center;
+  transition: transform .1s, filter .15s;
+}
+.spin-btn:hover { filter: brightness(1.12); transform: translate(-50%, -50%) scale(1.05); }
+.spin-btn:active { transform: translate(-50%, -50%) scale(.95); }
+.spin-btn:disabled { opacity: .5; cursor: not-allowed; transform: translate(-50%, -50%) scale(1); }
+.spin-btn::after {
+  content: ""; position: absolute; inset: -6px; border-radius: 50%;
+  border: 3px solid rgba(255,255,255,.35);
+}
+/* 中奖闪光 */
+.win-glow {
+  position: absolute; inset: -6%; border-radius: 50%; opacity: 0; pointer-events: none; z-index: 4;
+  background: radial-gradient(circle, rgba(255,215,80,.55), transparent 65%);
+}
+.win-glow.on { animation: pulse .8s ease-out; }
+@keyframes pulse { 0% { opacity: 1; } 100% { opacity: 0; } }
+.result-banner { text-align: center; font-size: 22px; font-weight: 800; min-height: 34px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<div class="game-wrap">
+  <div class="game-panel">
+    <div class="hud">
+      <span class="stat">💰 余额 <b id="hud-points" class="big">-</b></span>
+      <span class="stat">单次花费 <b style="color:var(--bad)">10 💎</b></span>
+      <span style="flex:1"></span>
+      <button class="btn" id="btn-spin">🎡 开始转盘（10💎）</button>
+    </div>
+  </div>
+
+  <div class="game-panel" style="text-align:center">
+    <div class="wheel-wrap" id="wheel-wrap">
+      <div class="wheel-pointer"></div>
+      <div class="win-glow" id="win-glow"></div>
+      <div class="wheel-disc" id="wheel-disc">
+        <span class="wl">+5分</span>
+        <span class="wl">+10分</span>
+        <span class="wl">0分</span>
+        <span class="wl">+50分</span>
+        <span class="wl">+2分</span>
+        <span class="wl">再转一次</span>
+        <span class="wl">+100分</span>
+        <span class="wl">-5分</span>
+      </div>
+      <button class="spin-btn" id="spin-btn" title="点击开始转盘">▶</button>
+    </div>
+    <div class="result-banner" id="result">来试试你的手气！</div>
+  </div>
+
+  <div class="game-panel">
+    <h2>🎲 奖区说明</h2>
+    <p style="color:var(--muted);line-height:2">
+      转盘由服务器随机判定，无法作弊。<br>
+      🏅 一等奖 +100 分 · 🎁 二等奖 +50 分 · 🔁 再转一次（免费）· ⚠️ 也有 -5 分的坏运区！
+    </p>
+  </div>
+
+  <div class="game-panel">
+    <h2>🏆 积分排行榜</h2>
+    <ul class="rank-list" id="rank-list"></ul>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+gameShell("🎡 幸运大转盘");
+initTopBar();
+
+/* ================= 配置 ================= */
+const N = 8;                          // 扇区数
+const NAMES = ["+5分", "+10分", "0分", "+50分", "+2分", "再转一次", "+100分", "-5分"];
+const SEG = Math.PI * 2 / N;
+
+/* ================= 转盘(纯 CSS) ================= */
+const wrap = document.getElementById("wheel-wrap");
+const disc = document.getElementById("wheel-disc");
+const labels = Array.from(document.querySelectorAll(".wl"));
+
+function layout() {
+  const w = Math.min(wrap.clientWidth, 560) || 560;
+  wrap.style.height = w + "px";
+  const R = w / 2;
+  const fs = Math.max(13, Math.round(w / 28));
+  labels.forEach((el, i) => {
+    const a = (i * 45 + 22.5) * Math.PI / 180;
+    el.style.fontSize = fs + "px";
+    el.style.left = (R + Math.cos(a) * R * 0.6) + "px";
+    el.style.top = (R + Math.sin(a) * R * 0.6) + "px";
+  });
+}
+window.addEventListener("resize", layout);
+
+/* ================= 旋转 ================= */
+let rot = 0;              // 当前角度(弧度)
+let speed = 0;            // 角速度
+let spinning = false;
+let target = 0;           // 目标角度
+
+function applyRot() {
+  disc.style.transform = "rotate(" + (rot * 180 / Math.PI) + "deg)";
+}
+
+/* ================= 游戏逻辑 ================= */
+let myPoints = 0;
+let pending = null;
+
+function hud() {
+  document.getElementById("hud-points").textContent = myPoints;
+  const busy = spinning || myPoints < 10;
+  document.getElementById("btn-spin").disabled = busy;
+  document.getElementById("spin-btn").disabled = busy;
+}
+
+function onRest() {
+  const p = pending;
+  if (!p) return;
+  pending = null;
+  const banner = document.getElementById("result");
+  if (p.free) {
+    banner.innerHTML = `🔁 恭喜！<b style="color:var(--ok)">再转一次</b>（免费）`;
+    toast("再转一次！免费抽奖", "ok");
+    glow();
+    setTimeout(spin, 1000);
+  } else {
+    banner.innerHTML = p.prize > 0
+      ? `🎉 恭喜获得 <b style="color:var(--gold)">${p.name}</b>`
+      : p.prize === 0 ? `😐 转到了 ${p.name}` : `😭 转到了 ${p.name}，破财消灾…`;
+    toast(p.prize > 0 ? `+${p.prize} 积分` : p.prize === 0 ? "没有中奖" : `${p.prize} 积分`, p.prize > 0 ? "ok" : "err");
+    if (p.prize > 0) glow();
+  }
+  refreshPoints();
+  refreshRank();
+  hud();
+}
+
+function glow() {
+  const g = document.getElementById("win-glow");
+  g.classList.remove("on"); void g.offsetWidth;
+  g.classList.add("on");
+}
+
+async function spin() {
+  if (!requireLogin()) return;
+  if (spinning || myPoints < 10) return;
+  try {
+    const r = await Api.spin();
+    myPoints = r.points;
+    spinning = true;
+    pending = r;
+    document.getElementById("result").textContent = "转动中…";
+    hud();
+    /* 目标:中奖扇区中心对齐顶部指针 */
+    const t = -(r.sector * SEG + SEG / 2);
+    const cur = Math.atan2(Math.sin(rot), Math.cos(rot));
+    let diff = t - cur;
+    while (diff < 0) diff += Math.PI * 2;
+    diff += Math.PI * 2 * (5 + Math.floor(Math.random() * 3));
+    target = rot + diff;
+    speed = 11 + Math.random() * 2.5;
+  } catch (e) {
+    toast(e.message, "err");
+    hud();
+  }
+}
+
+/* ================= 动画 ================= */
+let last = 0;
+function animate(t) {
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, (t - last) / 1000 || 0.016);
+  last = t;
+  if (!spinning) return;
+  if (speed > 0) {
+    rot += speed * dt;
+    speed *= 0.985;
+    if (speed < 0.22) {
+      const snap = Math.atan2(Math.sin(target - rot), Math.cos(target - rot));
+      rot += snap * Math.min(1, dt * 8);
+      if (Math.abs(snap) < 0.004) {
+        spinning = false;
+        rot = target;
+        onRest();
+      }
+    }
+  }
+  applyRot();
+}
+requestAnimationFrame(animate);
+
+/* ================= 初始化 ================= */
+async function refreshRank() {
+  try { await renderLeaderboard(document.getElementById("rank-list"), { type: "points" }); } catch (e) {}
+}
+
+document.getElementById("btn-spin").addEventListener("click", spin);
+document.getElementById("spin-btn").addEventListener("click", spin);
+
+(function init() {
+  layout();
+  applyRot();
+  if (Store.token) {
+    Api.me().then(({ user }) => { myPoints = user.points; hud(); }).catch(() => {});
+  }
+  hud();
+  refreshRank();
+})();
+</script>
+</body>
+</html>

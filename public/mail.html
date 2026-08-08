@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>站内信</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="game-wrap">
+  <div class="game-panel">
+    <div class="hud" style="justify-content:space-between">
+      <span style="font-weight:800;font-size:18px">📬 站内信</span>
+      <button class="btn" id="btn-new">✉️ 写新信</button>
+    </div>
+  </div>
+  <div class="game-panel">
+    <ul class="mail-list" id="mail-list"><li class="mail-item"><div class="m-meta">加载中…</div></li></ul>
+  </div>
+</div>
+
+<div class="modal-mask" id="write-modal">
+  <div class="modal">
+    <h2>✉️ 写信</h2>
+    <input id="w-to" placeholder="收件人昵称">
+    <input id="w-title" placeholder="标题">
+    <textarea id="w-content" style="width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:12px;padding:10px;font-size:14px;min-height:120px;outline:none" placeholder="内容…"></textarea>
+    <button class="btn" id="w-send" style="width:100%">发送</button>
+    <button class="modal-close" onclick="document.getElementById('write-modal').style.display='none'">✕</button>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+gameShell("📬 站内信");
+initTopBar();
+
+async function load() {
+  if (!requireLogin()) return;
+  try {
+    const { list } = await Api.mail();
+    const box = document.getElementById("mail-list");
+    box.innerHTML = list.length ? list.map(m => `
+      <li class="mail-item ${m.is_read ? "" : "unread"}" data-id="${m.id}">
+        <div class="m-title">${m.mtype === "system" ? '<span class="tag-system">📢 系统</span>' : ""} ${escapeHtml(m.title)}</div>
+        <div class="m-meta">来自 ${escapeHtml(m.from_name)} · ${fmtTime(m.created_at)}${m.is_read ? "" : " · <b style='color:var(--accent2)'>未读</b>"}</div>
+        <div class="m-body hidden">${escapeHtml(m.content)}</div>
+      </li>`).join("")
+      : `<li class="mail-item"><div class="m-meta">收件箱空空如也～</div></li>`;
+    box.querySelectorAll(".mail-item").forEach(el => {
+      el.onclick = async () => {
+        const body = el.querySelector(".m-body");
+        body.classList.toggle("hidden");
+        if (!el.dataset.read) {
+          el.dataset.read = "1";
+          el.classList.remove("unread");
+          try { await Api.mailRead(+el.dataset.id); refreshPoints(); } catch (e) {}
+        }
+      };
+    });
+  } catch (e) { toast(e.message, "err"); }
+}
+
+document.getElementById("btn-new").onclick = () => {
+  if (!requireLogin()) return;
+  document.getElementById("write-modal").style.display = "flex";
+};
+document.getElementById("w-send").onclick = async () => {
+  const to = document.getElementById("w-to").value.trim();
+  const title = document.getElementById("w-title").value.trim();
+  const content = document.getElementById("w-content").value.trim();
+  try {
+    await Api.mailSend(to, title, content);
+    document.getElementById("write-modal").style.display = "none";
+    toast("信已送出", "ok");
+    load();
+  } catch (e) { toast(e.message, "err"); }
+};
+
+window.onAuthChange = () => load();
+load();
+</script>
+</body>
+</html>

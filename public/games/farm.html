@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开心农场</title>
+<link rel="stylesheet" href="/css/style.css">
+<style>
+.plot .lv-badge {
+  position: absolute; top: 6px; right: 6px; font-size: 11px;
+  background: rgba(0,0,0,.5); border: 1px solid var(--gold); color: var(--gold);
+  border-radius: 8px; padding: 1px 7px;
+}
+.plot.locked { opacity: .75; }
+.stamina-bar { width: 160px; height: 12px; background: var(--panel2); border-radius: 6px; overflow: hidden; display: inline-block; vertical-align: middle; }
+.stamina-bar i { display: block; height: 100%; background: linear-gradient(90deg, #43e97b, #7c5cff); border-radius: 6px; transition: width .5s; }
+.cap-bar { height: 10px; background: var(--panel2); border-radius: 5px; overflow: hidden; }
+.cap-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--gold), var(--accent2)); transition: width .5s; }
+.inv-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--panel2); border-radius: 10px; margin-bottom: 8px; }
+.inv-row img { width: 30px; height: 30px; }
+.bld-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: var(--panel2); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; }
+.bld-row .b-emoji { font-size: 28px; }
+.bld-row .b-info { flex: 1; font-size: 13px; }
+.bld-row .b-lv { color: var(--gold); font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="game-wrap">
+  <div class="game-panel">
+    <div class="hud">
+      <span class="stat">💰 余额 <b id="hud-points" class="big">-</b></span>
+      <span class="stat">⚡ 体力 <b id="hud-stamina">-</b>
+        <span class="stamina-bar"><i id="stamina-fill" style="width:0%"></i></span>
+        <span id="stamina-next" style="color:var(--muted);font-size:12px"></span></span>
+      <span style="flex:1"></span>
+      <span class="stat">🏚 仓库 <b id="hud-cap">-</b>
+        <span class="cap-bar" style="width:120px"><i id="cap-fill" style="width:0%"></i></span></span>
+    </div>
+  </div>
+
+  <div class="farm-layout">
+    <div>
+      <div class="farm-grid" id="farm-grid" style="grid-template-columns:repeat(5,1fr)"></div>
+      <div class="shop panel" style="width:auto;margin-top:16px">
+        <h2>🌰 种子商店 <span class="sub">点击选中种子，再点击空地播种</span></h2>
+        <div id="shop-list" style="display:flex;gap:10px;flex-wrap:wrap"></div>
+      </div>
+    </div>
+
+    <div style="width:280px;flex-shrink:0;display:flex;flex-direction:column;gap:16px">
+      <div class="panel">
+        <h2>🏚 仓库（容量/出售）</h2>
+        <div id="inv-box"></div>
+        <p style="color:var(--muted);font-size:12px;line-height:1.8;margin-top:6px">
+          收获的作物存入仓库，出售换取积分。<br>仓库等级越高：容量越大、售价越高。
+        </p>
+      </div>
+      <div class="panel">
+        <h2>🏗 建筑升级</h2>
+        <div id="bld-box"></div>
+      </div>
+      <div class="panel">
+        <h2>🕵️ 去偷菜 <span class="sub">消耗 5 体力，得 40% 收益</span></h2>
+        <div style="display:flex;gap:8px">
+          <input id="steal-target" placeholder="输入玩家昵称" style="flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:10px;padding:9px 12px;outline:none">
+          <button class="btn mini" id="btn-look">查看</button>
+        </div>
+        <div id="steal-box" style="margin-top:10px"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+gameShell("🌱 开心农场");
+initTopBar();
+
+let farm = null;
+let selected = null;
+let myPoints = 0;
+const IMGS = { carrot: "🥕", tomato: "🍅", corn: "🌽", watermelon: "🍉" };
+
+function hud() {
+  document.getElementById("hud-points").textContent = myPoints;
+  if (farm) {
+    const s = farm.stamina;
+    const pct = Math.round(s.current / s.max * 100);
+    document.getElementById("hud-stamina").textContent = `${s.current}/${s.max}`;
+    document.getElementById("stamina-fill").style.width = pct + "%";
+    document.getElementById("stamina-next").textContent =
+      s.current >= s.max ? "已满" : `+1/${Math.ceil(s.next_in / 60)}分`;
+    document.getElementById("hud-cap").textContent = `${farm.capacity_used}/${farm.capacity}`;
+    document.getElementById("cap-fill").style.width = Math.min(100, farm.capacity_used / farm.capacity * 100) + "%";
+  }
+}
+
+function renderShop() {
+  document.getElementById("shop-list").innerHTML = Object.entries(farm.crops).map(([k, c]) => `
+    <div class="shop-item" data-crop="${k}" style="${selected === k ? "border-color:var(--ok)" : ""}">
+      <span class="si-emoji">${c.emoji}</span>
+      <div>
+        <div class="si-name">${c.name}</div>
+        <div class="si-info">种子${c.cost}💎 → 卖${farm.sell_prices[k]}💎<br>生长${c.grow_seconds}秒 · 占${c.size}格</div>
+      </div>
+    </div>`).join("");
+  document.querySelectorAll(".shop-item").forEach(el => {
+    el.onclick = () => { selected = el.dataset.crop; renderShop(); };
+  });
+}
+
+function plotHTML(p) {
+  const { slot } = p;
+  if (!p.unlocked) {
+    return `<div class="plot locked" data-slot="${slot}" data-act="unlock">
+      <span class="plus">⛏️</span>
+      <span class="plot-label">未开垦 · ${p.unlock_cost}💎</span>
+    </div>`;
+  }
+  const pct = Math.round(p.progress * 100);
+  if (!p.crop) {
+    return `<div class="plot empty" data-slot="${slot}">
+      <span class="lv-badge">Lv.${p.level}</span>
+      <span class="plus">＋</span>
+      <span class="plot-label">空地 · 点击播种</span>
+      ${p.level < 5 ? `<button class="mini-btn" data-act="upgrade" data-slot="${slot}" style="margin-top:4px">升级 ${farm.plot_upgrade_cost_dict[p.level]}💎</button>` : ""}
+    </div>`;
+  }
+  const done = p.ready;
+  const emoji = done ? p.emoji : ["🌱", "🌿"][Math.min(1, Math.floor(p.progress * 4))];
+  const stolen = p.stolen ? `<span style="color:var(--bad);font-size:11px">😢被${escapeHtml(p.stolen_by)}偷走</span>` : "";
+  return `<div class="plot" data-slot="${slot}">
+    <span class="lv-badge">Lv.${p.level}</span>
+    <span class="crop-emoji" style="filter:${done ? "none" : "grayscale(.4)"}">${emoji}</span>
+    ${done ? "" : `<div class="grow-bar"><i style="width:${pct}%"></i></div>`}
+    <span class="plot-label">${p.crop_name}${done ? " 熟了！" : ` ${pct}%`}</span>
+    ${stolen}
+    <div class="plot-actions">
+      ${done ? `<button class="mini-btn primary" data-act="harvest" data-slot="${slot}">🌾收获 ${p.sell_value}💎</button>`
+             : `<button class="mini-btn" data-act="water" data-slot="${slot}" ${p.waters >= p.waters_limit ? "disabled" : ""}>💧浇水(${p.waters_limit - p.waters})</button>`}
+    </div>
+  </div>`;
+}
+
+function renderPlots(plots, stealMode) {
+  const grid = document.getElementById("farm-grid");
+  grid.innerHTML = plots.map(plotHTML).join("");
+  grid.querySelectorAll("[data-act]").forEach(el => {
+    el.onclick = async (ev) => {
+      ev.stopPropagation();
+      const act = el.dataset.act;
+      const slot = +el.dataset.slot;
+      try {
+        let r;
+        if (act === "unlock") r = await Api.farmUnlock(slot);
+        else if (act === "upgrade") r = await Api.farmUpgrade(slot);
+        else if (act === "harvest") r = await Api.farmHarvest(slot);
+        else if (act === "water") r = await Api.farmWater(slot);
+        if (r.farm) { farm = r.farm; myPoints = r.points ?? myPoints; renderAll(); refreshPoints(); }
+        if (act === "harvest") harvestFx(el.closest(".plot"), farm ? "🌾" : "");
+      } catch (e) { toast(e.message, "err"); }
+    };
+  });
+  grid.querySelectorAll(".plot.empty").forEach(el => {
+    el.onclick = async () => {
+      if (!selected) { toast("先在商店选择种子", "err"); return; }
+      try {
+        const r = await Api.farmPlant(+el.dataset.slot, selected);
+        farm = r.farm; myPoints = r.points;
+        renderAll(); refreshPoints();
+      } catch (e) { toast(e.message, "err"); }
+    };
+  });
+}
+
+function harvestFx(plotEl, emoji) {
+  const fx = document.createElement("div");
+  fx.className = "harvest-fx";
+  fx.innerHTML = `<span class="f-emoji">🍀</span>`;
+  plotEl.appendChild(fx);
+  setTimeout(() => fx.remove(), 900);
+}
+
+function renderInv() {
+  const box = document.getElementById("inv-box");
+  const inv = farm.inventory;
+  const entries = Object.entries(inv);
+  box.innerHTML = entries.length ? entries.map(([crop, count]) => `
+    <div class="inv-row">
+      <span style="font-size:26px">${IMGS[crop]}</span>
+      <div style="flex:1">
+        <div style="font-weight:700">${farm.crops[crop].name} × ${count}</div>
+        <div style="color:var(--muted);font-size:12px">单价 ${farm.sell_prices[crop]}💎</div>
+      </div>
+      <button class="mini-btn primary" data-sell="${crop}">出售</button>
+    </div>`).join("")
+    : `<p style="color:var(--muted);font-size:13px">仓库空空如也</p>`;
+  box.querySelectorAll("[data-sell]").forEach(btn => {
+    btn.onclick = async () => {
+      try {
+        const r = await Api.farmSell(btn.dataset.sell);
+        farm = r.farm; myPoints = r.points;
+        renderAll(); refreshPoints();
+        toast(`出售成功 +${r.earned}💎`, "ok");
+      } catch (e) { toast(e.message, "err"); }
+    };
+  });
+}
+
+function renderBuildings() {
+  document.getElementById("bld-box").innerHTML = Object.entries(farm.buildings).map(([name, lv]) => {
+    const info = farm.buildings_info[name];
+    const maxed = lv >= info.max_level;
+    return `<div class="bld-row">
+      <span class="b-emoji">${info.emoji}</span>
+      <div class="b-info">
+        <div><b>${info.name}</b> <span class="b-lv">Lv.${lv}/${info.max_level}</span></div>
+        <div style="color:var(--muted)">${info.desc}</div>
+      </div>
+      ${maxed ? `<span style="color:var(--ok);font-size:12px">已满级</span>` :
+        `<button class="mini-btn" data-bld="${name}">升级 ${info.upgrade_cost}💎</button>`}
+    </div>`;
+  }).join("");
+  document.querySelectorAll("[data-bld]").forEach(btn => {
+    btn.onclick = async () => {
+      try {
+        const r = await Api.farmBuilding(btn.dataset.bld);
+        farm = r.farm; myPoints = r.points;
+        renderAll(); refreshPoints();
+      } catch (e) { toast(e.message, "err"); }
+    };
+  });
+}
+
+function renderAll() {
+  if (!farm) return;
+  hud();
+  renderShop();
+  renderPlots(farm.plots, false);
+  renderInv();
+  renderBuildings();
+  if (viewFarm) renderStealTarget();
+}
+
+let viewFarm = null;
+document.getElementById("btn-look").onclick = async () => {
+  if (!requireLogin()) return;
+  const name = document.getElementById("steal-target").value.trim();
+  if (!name) { toast("输入要偷的玩家昵称", "err"); return; }
+  try {
+    viewFarm = await Api.farmTarget(name);
+    renderStealTarget();
+  } catch (e) { toast(e.message, "err"); }
+};
+
+function renderStealTarget() {
+  const box = document.getElementById("steal-box");
+  const f = viewFarm;
+  if (!f) return;
+  box.innerHTML = `<div style="font-weight:700;margin-bottom:8px">🎯 ${escapeHtml(f.owner)} 的农场
+    ${f.plots.some(p => p.ready && p.crop) ? "" : "<span style='color:var(--muted);font-size:12px'>（暂无成熟作物）</span>"}</div>`;
+  const ready = f.plots.filter(p => p.unlocked && p.crop && p.ready && !p.stolen);
+  box.innerHTML += ready.length ? ready.map(p => `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--panel2);border-radius:10px;margin-bottom:6px;font-size:13px">
+      <span>${p.emoji}</span><span style="flex:1">${p.crop_name} · 可偷 ${p.steal_reward}💎</span>
+      <button class="mini-btn primary" data-steal="${p.slot}">偷！</button>
+    </div>`).join("") : "";
+  box.querySelectorAll("[data-steal]").forEach(btn => {
+    btn.onclick = async () => {
+      try {
+        const r = await Api.farmSteal(f.owner, +btn.dataset.steal);
+        farm = r.farm; myPoints = r.points;
+        viewFarm = r.target_farm;
+        renderAll(); refreshPoints();
+        toast(`🕵️ 偷到手 +${r.reward}💎！`, "ok");
+      } catch (e) { toast(e.message, "err"); }
+    };
+  });
+}
+
+async function load() {
+  if (!requireLogin()) return;
+  try {
+    farm = await Api.farm();
+    const { user } = await Api.me();
+    myPoints = user.points;
+    renderAll();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+window.onAuthChange = () => load();
+load();
+setInterval(load, 2500);
+</script>
+</body>
+</html>

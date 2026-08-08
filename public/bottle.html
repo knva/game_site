@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>漂流瓶</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="game-wrap">
+  <div class="game-panel">
+    <div class="hud">
+      <span class="stat">🗑 扔瓶 <b style="color:var(--bad)">2 💎/次</b></span>
+      <span class="stat">📥 捡瓶每日 <b>2</b> 个</span>
+      <span class="stat">👑 VIP 每日多扔 <b>1</b> 个</span>
+      <span style="flex:1"></span>
+      <button class="btn" id="btn-pick">🌊 捞一个瓶子</button>
+    </div>
+  </div>
+
+  <div class="game-panel">
+    <div class="bottle-shore">
+      <textarea id="bottle-input" maxlength="200" placeholder="把想说的话装进瓶子，扔进大海，等待有缘人捞起…（登录后需要 2 积分）"
+        style="width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:12px;padding:14px;font-size:15px;min-height:90px;outline:none"></textarea>
+      <button class="btn" id="btn-throw" style="margin-top:12px">🍾 扔出漂流瓶</button>
+    </div>
+  </div>
+
+  <div class="game-panel">
+    <h2>🏖 岸边（最近的瓶子）</h2>
+    <ul class="bottle-feed" id="bottle-feed"><li class="bottle-item">加载中…</li></ul>
+  </div>
+</div>
+
+<div class="modal-mask" id="pick-modal">
+  <div class="modal" style="text-align:center">
+    <h2>🌊 捞到一只漂流瓶！</h2>
+    <div id="pick-body" style="min-height:90px;line-height:1.9;padding:14px 0"></div>
+    <button class="btn" onclick="document.getElementById('pick-modal').style.display='none'">收好</button>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+gameShell("🍾 漂流瓶");
+initTopBar();
+
+async function loadFeed() {
+  try {
+    const { list } = await Api.bottleFeed();
+    document.getElementById("bottle-feed").innerHTML = list.length
+      ? list.map(b => `
+          <li class="bottle-item">
+            <div class="b-meta">🌊 ${escapeHtml(b.username)} · ${fmtTime(b.created_at)} · 👀 ${b.views}</div>
+            <div class="b-content">"${escapeHtml(b.content)}"</div>
+          </li>`).join("")
+      : `<li class="bottle-item">海边空荡荡，来扔第一个瓶子吧！</li>`;
+  } catch (e) {}
+}
+
+document.getElementById("btn-throw").onclick = async () => {
+  if (!requireLogin()) return;
+  const content = document.getElementById("bottle-input").value.trim();
+  if (!content) { toast("瓶子是空的！", "err"); return; }
+  try {
+    const r = await Api.bottleThrow(content);
+    document.getElementById("bottle-input").value = "";
+    toast("漂流瓶已扔向大海 🌊", "ok");
+    refreshPoints();
+    loadFeed();
+  } catch (e) { toast(e.message, "err"); }
+};
+
+document.getElementById("btn-pick").onclick = async () => {
+  if (!requireLogin()) return;
+  try {
+    const { bottle } = await Api.bottlePick();
+    if (!bottle) { toast("海里暂时没有瓶子了", "info"); return; }
+    document.getElementById("pick-body").innerHTML =
+      `<div style="color:var(--muted);font-size:13px">来自 ${escapeHtml(bottle.username)}</div>
+       <div style="font-size:16px">"${escapeHtml(bottle.content)}"</div>`;
+    document.getElementById("pick-modal").style.display = "flex";
+  } catch (e) { toast(e.message, "err"); }
+};
+
+window.onAuthChange = () => loadFeed();
+loadFeed();
+</script>
+</body>
+</html>
