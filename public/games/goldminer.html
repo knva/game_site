@@ -12,7 +12,139 @@
   display: flex; justify-content: center; gap: 22px;
   background: rgba(0,0,0,.35); padding: 8px 0; backdrop-filter: blur(4px);
 }
-#stage { display: block; width: 100%; border-radius: 14px; cursor: pointer; }
+/* 舞台:860x520 逻辑坐标,整体缩放 */
+.gm-stage {
+  position: relative; width: 100%; max-width: 900px; margin: 0 auto;
+  aspect-ratio: 860 / 520; border-radius: 14px; overflow: hidden; cursor: pointer;
+  background:
+    radial-gradient(circle at 20% 10%, rgba(255,255,255,.05), transparent 35%),
+    linear-gradient(180deg, #2a1f4d 0%, #4a3566 96px, #5d3a1e 110px, #4a2e15 55%, #38220e 100%);
+  box-shadow: 0 10px 30px rgba(0,0,0,.4);
+}
+.gm-inner { position: absolute; inset: 0; transform-origin: top left; }
+/* 天空星星 */
+.gm-star {
+  position: absolute; width: 3px; height: 3px; border-radius: 50%;
+  background: #fff; animation: twinkle 1.6s ease-in-out infinite;
+}
+@keyframes twinkle { 0%, 100% { opacity: .25; } 50% { opacity: .9; } }
+/* 平台 */
+.gm-platform {
+  position: absolute; left: 0; right: 0; top: 86px; height: 24px;
+  background: linear-gradient(180deg, #7a5230, #4a3018);
+}
+.gm-platform::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 2px; height: 3px;
+  background: repeating-linear-gradient(90deg, rgba(0,0,0,.25) 0 16px, transparent 16px 34px);
+}
+/* 右侧梯子 */
+.gm-ladder {
+  position: absolute; right: 26px; top: 8px; width: 22px; height: 82px;
+  border-left: 4px solid #8a6a3a; border-right: 4px solid #8a6a3a;
+  background: repeating-linear-gradient(180deg, #6a4e28 0 3px, transparent 3px 14px);
+}
+/* 土层颗粒 */
+.gm-soil-dots {
+  position: absolute; left: 0; right: 0; top: 110px; bottom: 0;
+  background-image: radial-gradient(circle, rgba(0,0,0,.16) 2px, transparent 2.5px);
+  background-size: 48px 42px;
+}
+/* ============ 矿工(纯 CSS) ============ */
+.gm-miner { position: absolute; width: 44px; height: 64px; transform: translate(-50%, -100%); z-index: 5; }
+.gm-miner .bob { position: absolute; inset: 0; animation: miner-bob 1s ease-in-out infinite; }
+@keyframes miner-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2.5px); } }
+.gm-miner .m-leg { position: absolute; top: 44px; width: 6px; height: 18px; background: #2c3550; border-radius: 3px; }
+.gm-miner .m-leg.l { left: 10px; }
+.gm-miner .m-leg.r { right: 10px; }
+.gm-miner .m-body {
+  position: absolute; left: 9px; top: 18px; width: 26px; height: 30px; border-radius: 7px;
+  background: linear-gradient(180deg, #3a6fd8, #2c55a8);
+}
+.gm-miner .m-belt { position: absolute; left: 9px; top: 36px; width: 26px; height: 5px; background: #8a6a2a; }
+.gm-miner .m-belt::after {
+  content: ""; position: absolute; left: 10px; top: 0; width: 6px; height: 5px; background: #ffd54f;
+}
+.gm-miner .m-head {
+  position: absolute; left: 13px; top: 2px; width: 18px; height: 18px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #f6d4ac, #f0c8a0);
+}
+.gm-miner .m-head::before {
+  content: ""; position: absolute; left: 2px; top: 9px; width: 14px; height: 6px;
+  border-radius: 0 0 50% 50%; background: #8a5a2a;
+}
+.gm-miner .m-eye { position: absolute; top: 8px; width: 3px; height: 3px; border-radius: 50%; background: #222; }
+.gm-miner .m-eye.l { left: 16px; }
+.gm-miner .m-eye.r { right: 16px; }
+.gm-miner .m-hat { position: absolute; left: 8px; top: -2px; width: 28px; height: 8px; border-radius: 4px; background: #e8b93a; }
+.gm-miner .m-hat::before {
+  content: ""; position: absolute; left: 8px; top: -10px;
+  border-left: 6px solid transparent; border-right: 6px solid transparent;
+  border-bottom: 10px solid #e8b93a;
+}
+/* ============ 物品 ============ */
+.gm-item { position: absolute; transform: translate(-50%, -50%); z-index: 3; animation: item-pulse 1.2s ease-in-out infinite; }
+@keyframes item-pulse { 0%, 100% { transform: translate(-50%, -50%) scale(1); } 50% { transform: translate(-50%, -50%) scale(1.06); } }
+.gm-item .i { position: absolute; inset: 0; }
+.gm-item.gold .i {
+  background: radial-gradient(circle at 35% 30%, #ffe98a, #ffc107 60%, #b8860b);
+  clip-path: polygon(25% 4%, 75% 4%, 98% 50%, 75% 96%, 25% 96%, 2% 50%);
+}
+.gm-item.gold::after {
+  content: ""; position: absolute; left: 28%; top: 22%; width: 26%; height: 15%;
+  border-radius: 50%; background: rgba(255,255,255,.5); transform: rotate(-25deg);
+}
+.gm-item.diamond .i {
+  background: linear-gradient(180deg, #e0f7ff, #81d4fa 50%, #3a7fb5);
+  clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+  filter: drop-shadow(0 0 8px rgba(129,212,250,.9));
+}
+.gm-item.diamond::after {
+  content: ""; position: absolute; left: 50%; top: 14%; width: 6%; height: 44%;
+  transform: translateX(-50%); background: rgba(255,255,255,.85);
+  clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+}
+.gm-item.bag .i {
+  background: radial-gradient(circle at 35% 30%, #ff9c6b, #d84315);
+  border-radius: 50% 50% 48% 52% / 55% 55% 45% 45%;
+  border: 3px solid #8a2a0a; box-sizing: border-box;
+}
+.gm-item.bag::before {
+  content: "$"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-weight: 900; color: #fff; font-size: 60%; text-shadow: 0 2px 0 #8a2a0a;
+}
+.gm-item.bag::after {
+  content: ""; position: absolute; left: 10%; right: 10%; top: 12%; height: 3px;
+  background: #8a2a0a; border-radius: 2px;
+}
+.gm-item.rock .i {
+  background: radial-gradient(circle at 35% 28%, #aeb6c2, #5d6673);
+  clip-path: polygon(50% 2%, 82% 14%, 97% 46%, 84% 90%, 46% 98%, 12% 86%, 2% 46%, 18% 14%);
+}
+.gm-item.rock::after {
+  content: ""; position: absolute; left: 30%; top: 42%; width: 40%; height: 3px;
+  background: rgba(0,0,0,.25); transform: rotate(-18deg); border-radius: 2px;
+}
+/* ============ 绳索 + 爪 ============ */
+.gm-rope {
+  position: absolute; height: 3px; z-index: 4; transform-origin: 0 50%;
+  background: repeating-linear-gradient(90deg, #dfe6ff 0 6px, rgba(223,230,255,.35) 6px 10px);
+  border-radius: 2px;
+}
+.gm-claw { position: absolute; width: 26px; height: 28px; transform: translate(-50%, -50%); z-index: 4; }
+.gm-claw svg { display: block; filter: drop-shadow(0 2px 2px rgba(0,0,0,.7)); }
+.gm-claw.open svg { filter: drop-shadow(0 0 6px rgba(255,213,79,.8)) drop-shadow(0 2px 2px rgba(0,0,0,.7)); }
+/* ============ 特效 ============ */
+.pt { position: absolute; width: 5px; height: 5px; border-radius: 50%; z-index: 7; pointer-events: none; }
+.pop {
+  position: absolute; z-index: 8; font-weight: 900; font-size: 24px; pointer-events: none;
+  transform: translate(-50%, -50%); text-shadow: 0 2px 4px rgba(0,0,0,.7);
+  animation: pop-float .8s ease-out forwards;
+}
+@keyframes pop-float {
+  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  to { opacity: 0; transform: translate(-50%, -120%) scale(1.2); }
+}
+.gm-stage.shake .gm-inner { transition: transform .05s linear; }
 </style>
 </head>
 <body>
@@ -23,7 +155,37 @@
       <span class="stat">💰 本局 <b id="hud-score">0</b></span>
       <span class="stat">拉力 <b id="hud-tension">-</b></span>
     </div>
-    <canvas id="stage" width="860" height="520"></canvas>
+    <div class="gm-stage" id="stage">
+      <div class="gm-inner" id="inner">
+        <div id="stars-layer"></div>
+        <div class="gm-platform"></div>
+        <div class="gm-ladder"></div>
+        <div class="gm-soil-dots"></div>
+        <div id="items-layer"></div>
+        <div class="gm-rope" id="rope" style="display:none"></div>
+        <div class="gm-claw" id="claw" style="display:none">
+          <svg viewBox="0 0 24 26" width="26" height="28">
+            <circle cx="12" cy="3.6" r="2.6" fill="none" stroke="#ffd54f" stroke-width="2.4"/>
+            <line x1="12" y1="6" x2="12" y2="19" stroke="#ffd54f" stroke-width="2.6" stroke-linecap="round"/>
+            <path d="M3.5 12.5c2.3 3.4 14.7 3.4 17 0" fill="none" stroke="#ffd54f" stroke-width="2.6" stroke-linecap="round"/>
+            <path d="M12 15.8l-4 4M12 15.8l4 4" stroke="#ffd54f" stroke-width="2.6" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="gm-miner" id="miner">
+          <div class="bob">
+            <div class="m-leg l"></div>
+            <div class="m-leg r"></div>
+            <div class="m-body"></div>
+            <div class="m-belt"></div>
+            <div class="m-head"></div>
+            <div class="m-eye l"></div>
+            <div class="m-eye r"></div>
+            <div class="m-hat"></div>
+          </div>
+        </div>
+        <div id="fx-layer"></div>
+      </div>
+    </div>
     <div style="position:absolute;bottom:14px;left:0;right:0;display:flex;justify-content:center;z-index:6">
       <button class="btn" id="btn-start" style="font-size:17px;padding:12px 34px">▶ 开始挖矿</button>
     </div>
@@ -34,7 +196,7 @@
     <p style="color:var(--muted);line-height:2">
       <b>← →</b> 移动矿工 &nbsp; <b>空格 / 点击画面</b> 放下钩子<br>
       抓取 🟡金块 💎钻石 💰钱袋 得分；大石头又慢又沉，长时间拉不上来绳子会断！<br>
-      每 12 秒矿脉刷新一次——⏳ 时间越少，💎 大奖（钻石/大金块）概率越高！<br>
+      矿脉布局每局固定不变，记住位置，直奔大奖！<br>
       60 秒倒计时结束自动结算。得分由服务器校验，防篡改防重放。
     </p>
   </div>
@@ -49,10 +211,36 @@
 gameShell("⛏️ 黄金矿工");
 initTopBar();
 
-/* ================= Canvas 2D 场景 ================= */
-const cv = document.getElementById("stage");
-const ctx = cv.getContext("2d");
-const W = cv.width, H = cv.height;
+/* ================= DOM 场景(860x520 逻辑坐标,整体缩放) ================= */
+const W = 860, H = 520;
+const stage = document.getElementById("stage");
+const inner = document.getElementById("inner");
+const itemsLayer = document.getElementById("items-layer");
+const fxLayer = document.getElementById("fx-layer");
+const ropeEl = document.getElementById("rope");
+const clawEl = document.getElementById("claw");
+const minerEl = document.getElementById("miner");
+
+/* 舞台缩放 */
+function fit() {
+  const s = stage.clientWidth / W;
+  inner.style.transform = `scale(${s})`;
+}
+window.addEventListener("resize", fit);
+fit();
+
+/* 星星背景 */
+(function buildStars() {
+  const box = document.getElementById("stars-layer");
+  for (let i = 0; i < 24; i++) {
+    const d = document.createElement("div");
+    d.className = "gm-star";
+    d.style.left = (i * 97.3) % W + "px";
+    d.style.top = (i * 41.7) % 78 + "px";
+    d.style.animationDelay = (i % 7) * 0.2 + "s";
+    box.appendChild(d);
+  }
+})();
 
 /* 平台（矿工站立处） */
 const PLAT_Y = 96;
@@ -101,8 +289,9 @@ let items = [];
 let particles = [];
 let popups = [];
 
-/* 矿位固定(固定种子),类型按大奖概率加权 */
-function genWorld(chance = 0) {
+/* 矿位+类型完全固定(固定种子,每局布局一致,不随时间刷新) */
+function genWorld() {
+  items.forEach(it => it.el && it.el.remove());
   items = [];
   const rnd = mulberry32(FIXED_SEED);
   const Y0 = 210, Y1 = H - 40;
@@ -110,161 +299,27 @@ function genWorld(chance = 0) {
   while (items.length < 26 && guard++ < 700) {
     const x = 50 + rnd() * (W - 100);
     const y = Y0 + rnd() * (Y1 - Y0);
-    const g = pickGen(rnd, chance);
+    const g = pickGen(rnd, 0.5);   // 固定权重,类型也确定
     const r = g.r;
     if (items.some(o => Math.hypot(o.x - x, o.y - y) < o.r + r + 6)) { guard++; continue; }
-    items.push({ ...g, x, y, vx: 0, vy: 0, grabbed: false, spin: rnd() * 6.28 });
+    const el = document.createElement("div");
+    el.className = "gm-item " + g.type;
+    el.style.width = r * 2 + "px";
+    el.style.height = r * 2 + "px";
+    el.style.animationDelay = -(Math.random() * 1.2) + "s";
+    el.innerHTML = '<div class="i"></div>';
+    itemsLayer.appendChild(el);
+    items.push({ ...g, x, y, vx: 0, vy: 0, grabbed: false, spin: rnd() * 6.28, el });
   }
 }
 
-/* ================= 绘制 ================= */
-function drawBackground() {
-  /* 天空 */
-  const sky = ctx.createLinearGradient(0, 0, 0, PLAT_Y);
-  sky.addColorStop(0, "#2a1f4d"); sky.addColorStop(1, "#4a3566");
-  ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, W, PLAT_Y);
-  /* 星星 */
-  ctx.fillStyle = "rgba(255,255,255,.7)";
-  for (let i = 0; i < 24; i++) {
-    const sx = (i * 97.3) % W, sy = (i * 41.7) % (PLAT_Y - 30);
-    ctx.globalAlpha = 0.3 + 0.5 * Math.abs(Math.sin(performance.now() / 900 + i));
-    ctx.fillRect(sx, sy, 2, 2);
-  }
-  ctx.globalAlpha = 1;
-  /* 平台 */
-  const plat = ctx.createLinearGradient(0, PLAT_Y - 14, 0, PLAT_Y + 16);
-  plat.addColorStop(0, "#7a5230"); plat.addColorStop(1, "#4a3018");
-  ctx.fillStyle = plat;
-  ctx.fillRect(0, PLAT_Y - 10, W, 22);
-  ctx.fillStyle = "rgba(0,0,0,.25)";
-  for (let x = 0; x < W; x += 34) ctx.fillRect(x, PLAT_Y + 2, 18, 3);
-  /* 土层 */
-  const soil = ctx.createLinearGradient(0, PLAT_Y, 0, H);
-  soil.addColorStop(0, "#5d3a1e"); soil.addColorStop(.5, "#4a2e15"); soil.addColorStop(1, "#38220e");
-  ctx.fillStyle = soil;
-  ctx.fillRect(0, PLAT_Y + 12, W, H - PLAT_Y);
-  /* 土粒 */
-  ctx.fillStyle = "rgba(0,0,0,.18)";
-  for (let i = 0; i < 120; i++) {
-    const x = (i * 61.7) % W, y = PLAT_Y + 14 + ((i * 37.3) % (H - PLAT_Y - 20));
-    ctx.fillRect(x, y, 2 + (i % 3), 2);
-  }
-  /* 右侧小梯子装饰 */
-  ctx.strokeStyle = "#8a6a3a"; ctx.lineWidth = 4;
-  ctx.beginPath(); ctx.moveTo(W - 40, PLAT_Y - 8); ctx.lineTo(W - 40, 10); ctx.stroke();
-  ctx.strokeStyle = "#6a4e28";
-  for (let y = 14; y < PLAT_Y - 10; y += 14) {
-    ctx.beginPath(); ctx.moveTo(W - 52, y); ctx.lineTo(W - 28, y); ctx.stroke();
-  }
+/* 物品/矿工/绳索位置同步 */
+function syncItem(it) {
+  it.el.style.left = it.x + "px";
+  it.el.style.top = it.y + "px";
 }
 
-function drawMiner(x) {
-  const t = performance.now() / 1000;
-  const bob = Math.sin(t * 2.2) * 1.2;
-  ctx.save();
-  ctx.translate(x, PLAT_Y - 4 + bob);
-  /* 腿 */
-  ctx.strokeStyle = "#2c3550"; ctx.lineWidth = 6;
-  ctx.beginPath(); ctx.moveTo(-8, 8); ctx.lineTo(-10, 24); ctx.moveTo(8, 8); ctx.lineTo(10, 24); ctx.stroke();
-  /* 身体 */
-  ctx.fillStyle = "#3a6fd8";
-  roundRect(-13, -18, 26, 28, 6); ctx.fill();
-  ctx.fillStyle = "#2c55a8";
-  roundRect(-13, -4, 26, 14, 6); ctx.fill();
-  /* 腰带 */
-  ctx.fillStyle = "#8a6a2a"; ctx.fillRect(-13, -2, 26, 5);
-  ctx.fillStyle = "#ffd54f"; ctx.fillRect(-3, -2, 6, 5);
-  /* 头 */
-  ctx.fillStyle = "#f0c8a0";
-  ctx.beginPath(); ctx.arc(0, -30, 9, 0, Math.PI * 2); ctx.fill();
-  /* 胡子 */
-  ctx.fillStyle = "#8a5a2a";
-  ctx.beginPath(); ctx.arc(0, -24, 8, 0.25, Math.PI - 0.25); ctx.fill();
-  /* 帽子 */
-  ctx.fillStyle = "#e8b93a";
-  ctx.beginPath(); ctx.ellipse(0, -38, 14, 4, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.moveTo(-10, -38); ctx.lineTo(0, -52); ctx.lineTo(12, -38); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = "#c9952a";
-  ctx.fillRect(-10, -38, 20, 3);
-  /* 眼睛 */
-  ctx.fillStyle = "#222";
-  ctx.beginPath(); ctx.arc(-3, -31, 1.8, 0, Math.PI * 2); ctx.arc(3, -31, 1.8, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-}
-
-function roundRect(x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
-
-function drawItem(it) {
-  ctx.save();
-  ctx.translate(it.x, it.y);
-  const pulse = 1 + Math.sin(performance.now() / 400 + it.spin) * 0.04;
-  ctx.scale(pulse, pulse);
-  if (it.type === "gold") {
-    const g = ctx.createRadialGradient(-4, -5, 3, 0, 0, it.r);
-    g.addColorStop(0, "#ffe98a"); g.addColorStop(.6, "#ffc107"); g.addColorStop(1, "#b8860b");
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    for (let i = 0; i < 6; i++) {
-      const a = i / 6 * Math.PI * 2 + 0.3;
-      const rr = i % 2 ? it.r : it.r * 0.82;
-      ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
-    }
-    ctx.closePath(); ctx.fill();
-    ctx.strokeStyle = "#8a6200"; ctx.lineWidth = 2; ctx.stroke();
-    ctx.fillStyle = "rgba(255,255,255,.5)";
-    ctx.beginPath(); ctx.ellipse(-it.r * .3, -it.r * .35, it.r * .3, it.r * .16, -.5, 0, Math.PI * 2); ctx.fill();
-  } else if (it.type === "diamond") {
-    ctx.shadowColor = "#81d4fa"; ctx.shadowBlur = 14;
-    const g = ctx.createLinearGradient(0, -it.r, 0, it.r);
-    g.addColorStop(0, "#e0f7ff"); g.addColorStop(.5, "#81d4fa"); g.addColorStop(1, "#3a7fb5");
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.moveTo(0, -it.r); ctx.lineTo(it.r * .7, 0); ctx.lineTo(0, it.r); ctx.lineTo(-it.r * .7, 0);
-    ctx.closePath(); ctx.fill();
-    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.stroke();
-    ctx.shadowBlur = 0;
-  } else if (it.type === "bag") {
-    const g = ctx.createRadialGradient(-4, -5, 3, 0, 0, it.r);
-    g.addColorStop(0, "#ff9c6b"); g.addColorStop(1, "#d84315");
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(0, 2, it.r, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "#8a2a0a"; ctx.lineWidth = 2; ctx.stroke();
-    ctx.fillStyle = "#fff"; ctx.font = `bold ${it.r}px sans-serif`;
-    ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText("$", 0, it.r * 0.1);
-    ctx.strokeStyle = "#8a2a0a"; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.moveTo(-it.r * .5, -it.r * .6); ctx.lineTo(it.r * .5, -it.r * .6); ctx.stroke();
-  } else { /* rock */
-    const g = ctx.createRadialGradient(-5, -6, 4, 0, 0, it.r);
-    g.addColorStop(0, "#aeb6c2"); g.addColorStop(1, "#5d6673");
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    const n = 7;
-    for (let i = 0; i < n; i++) {
-      const a = i / n * Math.PI * 2;
-      const rr = it.r * (0.85 + ((i * 37) % 13) / 40);
-      ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
-    }
-    ctx.closePath(); ctx.fill();
-    ctx.strokeStyle = "#454d58"; ctx.lineWidth = 2; ctx.stroke();
-    ctx.strokeStyle = "rgba(0,0,0,.25)"; ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(-it.r * .4, -it.r * .1); ctx.lineTo(-it.r * .05, it.r * .25); ctx.lineTo(it.r * .35, it.r * .1);
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-
-function drawHook(cartX, hook) {
+function syncHook(cartX, hook) {
   const startX = cartX, startY = PLAT_Y - 6;
   let tipX, tipY;
   if (hook.item) { tipX = hook.item.x; tipY = hook.item.y; }
@@ -272,37 +327,43 @@ function drawHook(cartX, hook) {
     tipX = startX + Math.sin(hook.angle) * hook.len;
     tipY = startY + hook.len * Math.cos(hook.angle);
   }
-  /* 绳索 */
-  ctx.strokeStyle = "#dfe6ff"; ctx.lineWidth = 2.5;
-  ctx.setLineDash([6, 4]);
-  ctx.beginPath(); ctx.moveTo(startX, startY); ctx.lineTo(tipX, tipY); ctx.stroke();
-  ctx.setLineDash([]);
-  /* 爪 */
-  ctx.save();
-  ctx.translate(tipX, tipY);
-  const open = hook.item ? 0.45 : 0.95;
-  ctx.rotate(Math.sin(hook.angle) * 0.35);
-  ctx.strokeStyle = "#e8ecff"; ctx.lineWidth = 4; ctx.lineCap = "round";
-  ctx.beginPath();
-  ctx.moveTo(0, 0); ctx.lineTo(6 * open, 14);
-  ctx.moveTo(0, 0); ctx.lineTo(-6 * open, 14);
-  ctx.stroke();
-  ctx.fillStyle = "#ffd54f";
-  ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = "#8a6a00"; ctx.lineWidth = 1.5; ctx.stroke();
-  ctx.restore();
+  ropeEl.style.display = "block";
+  ropeEl.style.left = startX + "px";
+  ropeEl.style.top = startY + "px";
+  ropeEl.style.width = hook.len + "px";
+  ropeEl.style.transform = `rotate(${90 - hook.angle * 180 / Math.PI}deg)`;
+  clawEl.style.display = "block";
+  clawEl.style.left = tipX + "px";
+  clawEl.style.top = tipY + "px";
+  clawEl.classList.toggle("open", !hook.item);
 }
 
-/* 粒子 */
+function syncMiner(cartX) {
+  minerEl.style.left = cartX + "px";
+  minerEl.style.top = PLAT_Y - 4 + "px";
+}
+
+/* 粒子 / 浮动文字 */
 function burst(x, y, color, n = 26) {
   for (let i = 0; i < n; i++) {
     const a = Math.random() * Math.PI * 2;
     const sp = 60 + Math.random() * 160;
-    particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 60, life: 1, color });
+    const p = document.createElement("div");
+    p.className = "pt";
+    p.style.background = color;
+    fxLayer.appendChild(p);
+    particles.push({ el: p, x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 60, life: 1 });
   }
 }
 function popup(text, x, y, color = "#ffd54f") {
-  popups.push({ text, x, y, life: 1, color });
+  const p = document.createElement("div");
+  p.className = "pop";
+  p.textContent = text;
+  p.style.color = color;
+  p.style.left = x + "px";
+  p.style.top = y + "px";
+  fxLayer.appendChild(p);
+  popups.push({ el: p, t: performance.now() });
 }
 
 /* ================= 游戏逻辑 ================= */
@@ -312,7 +373,7 @@ document.addEventListener("keydown", e => {
   keys[e.code] = true;
 });
 document.addEventListener("keyup", e => keys[e.code] = false);
-cv.addEventListener("click", () => { if (running) dropHook(); });
+stage.addEventListener("click", () => { if (running) dropHook(); });
 
 let running = false, over = false, submitted = false;
 let timeLeft = 60, score = 0;
@@ -331,9 +392,8 @@ function startGame() {
   Api.gameStart("goldminer").then(r => {
     gameToken = r.token;
     reset();
-    genWorld(bigChance());
+    genWorld();
     running = true;
-    startRefresh();
     toast(`门票 -${r.ticket}💎 · 结算收益 ${r.pay_range[0]}~${r.pay_range[1]}💎`, "ok");
   }).catch(e => toast(e.message, "err"));
 }
@@ -359,7 +419,12 @@ function reset() {
   over = false;
   timeLeft = 60; score = 0; cartX = W / 2;
   tension = 0;
-  hook = { angle: 0, speed: 0.85, drop: false, len: 2, maxLen: H - 60, item: null };
+  hook = { angle: 0, speed: 1.05, drop: false, len: 40, maxLen: H - 60, item: null };
+  ropeEl.style.display = "none";
+  clawEl.style.display = "none";
+  fxLayer.innerHTML = "";
+  particles = []; popups = [];
+  syncMiner(cartX);
   hud();
 }
 
@@ -367,15 +432,28 @@ function loseItem() {
   if (hook.item) {
     hook.item.grabbed = false;
     hook.item.vy = -180; hook.item.vx = (Math.random() - 0.5) * 200;
+    hook.item.flying = true;   // 甩飞的矿做自由落体,落地停住
   }
   hook.item = null;
   hook.drop = false;
+  hook.len = 40;   // 拉空/断绳后绳长复位,钩子缩回摇摆位置,可继续游玩
   tension = 0;
 }
 
 /* ================= 主循环 ================= */
 let last = 0;
 let shake = 0;
+let stageScale = 1;
+
+function applyShake() {
+  if (shake > 0) {
+    const sx = (Math.random() - 0.5) * shake * 14;
+    const sy = (Math.random() - 0.5) * shake * 14;
+    inner.style.transform = `scale(${stageScale}) translate(${sx}px, ${sy}px)`;
+  } else {
+    inner.style.transform = `scale(${stageScale})`;
+  }
+}
 
 function animate(t) {
   requestAnimationFrame(animate);
@@ -392,7 +470,7 @@ function animate(t) {
     const h = hook;
     if (!h.drop) {
       h.angle += h.speed * dt;
-      if (h.angle > 0.55 || h.angle < -0.55) h.speed *= -1;
+      if (h.angle > 0.8 || h.angle < -0.8) h.speed *= -1;   // ±46° 大幅摆动
     } else if (!h.item) {
       h.len += 260 * dt;
       if (h.len >= h.maxLen) loseItem();
@@ -417,9 +495,11 @@ function animate(t) {
         burst(it.x, it.y, it.type === "diamond" ? "#81d4fa" : "#ffd54f", 30);
         popup(`+${it.v}`, it.x, it.y - 20);
         it.grabbed = false;
+        it.el.remove();
         items.splice(items.indexOf(it), 1);
         h.item = null;
         h.drop = false;
+        h.len = 40;   // 收获后绳长复位,钩子回到摇摆位置(否则缩没看不见)
       }
       h.len -= (2.2 / it.w) * dt * 100;
       const a = h.angle;
@@ -429,8 +509,9 @@ function animate(t) {
     }
   }
 
-  /* 物品自由落体 */
+  /* 物品物理:位置始终同步,仅被甩飞的矿做自由落体 */
   items.forEach(it => {
+    if (!it.flying) { syncItem(it); return; }   // 固定矿:只同步位置
     if (it.grabbed) return;
     it.vy += 220 * dt;
     it.y += it.vy * dt;
@@ -439,6 +520,9 @@ function animate(t) {
     if (it.y > H - it.r) { it.y = H - it.r; it.vy = -it.vy * 0.4; it.vx *= 0.7; }
     if (it.x < it.r) it.x = it.r;
     if (it.x > W - it.r) it.x = W - it.r;
+    /* 落地停住,不再弹跳 */
+    if (it.y >= H - it.r - 0.5 && Math.abs(it.vy) < 5) { it.vy = 0; it.vx = 0; it.flying = false; }
+    syncItem(it);
   });
   if (hook.item && !hook.item.grabbed) { hook.item = null; hook.drop = false; tension = 0; }
 
@@ -447,40 +531,20 @@ function animate(t) {
     p.life -= dt * 1.2;
     p.x += p.vx * dt; p.y += p.vy * dt;
     p.vy += 260 * dt;
+    p.el.style.left = p.x + "px";
+    p.el.style.top = p.y + "px";
+    p.el.style.opacity = Math.max(0, p.life);
   });
   particles = particles.filter(p => p.life > 0);
-  popups.forEach(p => { p.life -= dt; p.y -= 40 * dt; });
-  popups = popups.filter(p => p.life > 0);
+  popups.forEach(p => { if (performance.now() - p.t > 800) { p.el.remove(); } });
+  popups = popups.filter(p => performance.now() - p.t <= 800);
 
-  /* ===== 渲染 ===== */
-  ctx.save();
-  if (shake > 0) {
-    shake -= dt;
-    ctx.translate((Math.random() - 0.5) * shake * 14, (Math.random() - 0.5) * shake * 14);
-  }
-  drawBackground();
-  items.forEach(drawItem);
-  drawHook(cartX, hook);
-  drawMiner(cartX);
-  /* 粒子 */
-  particles.forEach(p => {
-    ctx.globalAlpha = Math.max(0, p.life);
-    ctx.fillStyle = p.color;
-    ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
-  });
-  ctx.globalAlpha = 1;
-  /* 浮动文字 */
-  popups.forEach(p => {
-    ctx.globalAlpha = Math.max(0, p.life);
-    ctx.fillStyle = p.color;
-    ctx.font = "bold 26px sans-serif";
-    ctx.textAlign = "center";
-    ctx.strokeStyle = "rgba(0,0,0,.7)"; ctx.lineWidth = 4;
-    ctx.strokeText(p.text, p.x, p.y);
-    ctx.fillText(p.text, p.x, p.y);
-  });
-  ctx.globalAlpha = 1;
-  ctx.restore();
+  /* 渲染 */
+  if (shake > 0) shake -= dt;
+  stageScale = stage.clientWidth / W;
+  applyShake();
+  syncMiner(cartX);
+  syncHook(cartX, hook);
 
   if (over) hud();
 }

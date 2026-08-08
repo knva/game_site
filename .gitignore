@@ -1,0 +1,10 @@
+# 敏感数据(数据库含密码哈希,不上传)
+data/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 临时/本地
+*.log
+.hermes/

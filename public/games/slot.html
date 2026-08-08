@@ -37,7 +37,23 @@
   background: #060310; border: 4px solid #0a0618; border-radius: 6px; padding: 6px;
   box-shadow: inset 0 0 0 2px #2a1f45, inset 0 8px 24px rgba(0,0,0,.8);
 }
-.reel-box canvas { display: block; image-rendering: pixelated; }
+.reel-window {
+  position: relative; width: 110px; height: 300px;
+  overflow: hidden; border-radius: 4px;
+}
+.reel-window::after {
+  content: ""; position: absolute; left: 4px; right: 4px; top: 106px; height: 88px;
+  border: 2px solid rgba(255,225,77,.25); border-radius: 4px;
+  pointer-events: none; z-index: 2;
+}
+.reel-strip { position: absolute; left: 0; top: 0; width: 100%; will-change: transform; }
+.reel-strip .roll-sym {
+  display: flex; align-items: center; justify-content: center;
+  width: 88px; height: 88px; margin: 0 11px 10px;
+  font-size: 60px; line-height: 1;
+  filter: drop-shadow(0 2px 2px rgba(0,0,0,.6));
+  user-select: none;
+}
 /* 拉杆 */
 .lever-area { position: relative; width: 64px; height: 340px; flex-shrink: 0; }
 .lever-slot {
@@ -92,7 +108,8 @@
   background: #241a40; border: 2px solid #3a2a5a; border-radius: 6px; padding: 5px 10px;
   color: #c8bff0; box-shadow: 2px 2px 0 #0a0618;
 }
-.paytable8 canvas { image-rendering: pixelated; }
+.paytable8 .pay-item { display: inline-flex; align-items: center; gap: 4px; }
+.paytable8 .pay-emoji { font-size: 22px; line-height: 1; }
 /* 按钮 8bit */
 .btn8 {
   font-family: "Courier New", monospace; font-weight: 900; letter-spacing: 2px;
@@ -206,11 +223,10 @@
 gameShell("🎰 水果老虎机");
 initTopBar();
 
-/* ============ 8-BIT 符号(现有图片降采样像素化) ============ */
+/* ============ 8-BIT 符号(emoji,字体渲染,任何环境可见;不依赖位图) ============ */
 const IMGS = {
-  cherry: "/img/cherry.png", lemon: "/img/lemon.png", watermelon: "/img/watermelon.png",
-  grapes: "/img/grapes.png", strawberry: "/img/strawberry.png", orange: "/img/orange.png",
-  apple: "/img/apple.png", gem: "/img/gem.png",
+  cherry: "🍒", lemon: "🍋", watermelon: "🍉", grapes: "🍇",
+  strawberry: "🍓", orange: "🍊", apple: "🍎", gem: "💎",
 };
 const NAMES = {
   cherry: "樱桃", lemon: "柠檬", watermelon: "西瓜", grapes: "葡萄",
@@ -218,65 +234,38 @@ const NAMES = {
 };
 const SYMBOLS = Object.keys(IMGS);
 
-/* 预加载图片并像素化(降采样到 20x20 再放大,imageSmoothing off) */
-const pixCache = {};
-let imgsLoaded = 0;
-function loadSymbols(cb) {
-  let pending = SYMBOLS.length;
-  SYMBOLS.forEach(k => {
-    const img = new Image();
-    img.onload = () => {
-      const s = document.createElement("canvas");
-      s.width = 20; s.height = 20;
-      const g = s.getContext("2d");
-      g.drawImage(img, 0, 0, 20, 20);
-      pixCache[k] = s;
-      if (--pending === 0) cb();
-    };
-    img.onerror = () => { pixCache[k] = null; if (--pending === 0) cb(); };
-    img.src = IMGS[k];
-  });
-}
-
-/* ============ 滚轮 ============ */
-const REEL_H = 300, SYM = 88, ROWS = 3;   // 显示 3 个符号
+/* ============ 滚轮 (纯 DOM:overflow hidden + translateY) ============ */
+const REEL_H = 300, SYM = 88, STEP = SYM + 10;   // 符号 88px + 间隔 10px
+const CENTER = (REEL_H - SYM) / 2;               // offset≡0 时符号 0 居中于中线
+const LEAD = 2 * STEP;                           // strip 前冗余 2 个符号占的偏移
+const CYCLE = STEP * SYMBOLS.length;             // 8 个符号为一循环(无缝回绕)
 const reels = [];
 function buildReels() {
   for (let i = 0; i < 3; i++) {
     const box = document.getElementById("reel-" + i);
-    const cv = document.createElement("canvas");
-    cv.width = 110; cv.height = REEL_H;
-    box.appendChild(cv);
-    reels.push({ cv, ctx: cv.getContext("2d"), offset: 0, speed: 0, target: null, spinIdx: i });
+    const win = document.createElement("div");
+    win.className = "reel-window";
+    const strip = document.createElement("div");
+    strip.className = "reel-strip";
+    for (let j = -2; j < SYMBOLS.length * 2 + 2; j++) {   // 前后各冗余 2 个,任何偏移窗口都有 ≥3 个符号
+      const k = SYMBOLS[((j % SYMBOLS.length) + SYMBOLS.length) % SYMBOLS.length];
+      const sp = document.createElement("span");
+      sp.className = "roll-sym";
+      sp.textContent = IMGS[k];
+      sp.title = NAMES[k];
+      strip.appendChild(sp);
+    }
+    win.appendChild(strip);
+    box.appendChild(win);
+    const r = { strip, offset: 0, speed: 0, target: null, spinIdx: i };
+    applyReel(r);
+    reels.push(r);
   }
 }
-function drawReel(r) {
-  const g = r.ctx;
-  g.clearRect(0, 0, 110, REEL_H);
-  g.imageSmoothingEnabled = false;
-  const step = SYM + 10;
-  const first = Math.floor(r.offset / step) - 1;
-  const y0 = -Math.floor(r.offset % step);
-  for (let row = first; row < first + ROWS + 3; row++) {
-    const idx = ((row % SYMBOLS.length) + SYMBOLS.length) % SYMBOLS.length;
-    const key = SYMBOLS[idx];
-    const y = y0 + row * step;
-    if (y > REEL_H || y + SYM < 0) continue;
-    if (pixCache[key]) {
-      g.drawImage(pixCache[key], 11, y, 88, 88);
-    } else {
-      g.fillStyle = "#241a40"; g.fillRect(11, y, 88, 88);
-      g.fillStyle = "#ffe14d"; g.font = "44px sans-serif"; g.textAlign = "center";
-      g.fillText("?", 55, y + 62);
-    }
-    /* 符号分隔线 */
-    g.fillStyle = "rgba(255,255,255,.06)";
-    g.fillRect(8, y + SYM + 2, 94, 3);
-  }
-  /* 槽位高亮 */
-  g.strokeStyle = "rgba(255,225,77,.25)";
-  g.lineWidth = 2;
-  g.strokeRect(4, REEL_H / 2 - SYM / 2 - 2, 102, SYM + 4);
+function applyReel(r) {
+  /* offset 取模到 [0, CYCLE);translateY 带前冗余偏移,任何位置窗口都有 ≥3 个符号且目标符号居中 */
+  const off = ((r.offset % CYCLE) + CYCLE) % CYCLE;
+  r.strip.style.transform = "translateY(" + (CENTER - LEAD - off) + "px)";
 }
 
 /* ============ 8-BIT 音乐(WebAudio) ============ */
@@ -354,12 +343,8 @@ function renderPaytable() {
   box.innerHTML = "";
   Object.entries(payouts).forEach(([k, v]) => {
     const s = document.createElement("span");
-    const c = document.createElement("canvas");
-    c.width = 22; c.height = 22;
-    const g = c.getContext("2d");
-    if (pixCache[k]) { g.imageSmoothingEnabled = false; g.drawImage(pixCache[k], 1, 1, 20, 20); }
-    s.appendChild(c);
-    s.appendChild(document.createTextNode(`${NAMES[k]} ${v}分`));
+    s.className = "pay-item";
+    s.innerHTML = `<span class="pay-emoji">${IMGS[k]}</span> ${NAMES[k]} ${v}分`;
     box.appendChild(s);
   });
 }
@@ -389,15 +374,16 @@ function updateReels(dt, finalReel) {
   let allDone = true;
   reels.forEach((r, i) => {
     if (r.target === null) {
-      /* 转动中:偏移无限累加 */
+      /* 转动中:偏移无限累加,超过一个循环无缝回绕 */
+      allDone = false;
       r.offset += r.speed * dt;
+      if (r.offset >= CYCLE) r.offset -= CYCLE;
       if (reelSpinT > 0.8 + i * 0.55) {
-        /* 该列开始减速并锁定到目标 */
+        /* 该列开始减速并锁定到目标(目标符号对准中线) */
         const targetIdx = SYMBOLS.indexOf(finalReel[i]);
-        const step = SYM + 10;
-        /* 让目标符号对齐中线:offset % step == 0 时第一行在顶部 */
-        const base = Math.floor(r.offset / step) * step;
-        r.target = base + targetIdx * step;
+        let t = targetIdx * STEP;
+        while (t < r.offset + CYCLE) t += CYCLE;
+        r.target = t;
         r.speed = 0;
         sfx.stop();
       } else {
@@ -410,12 +396,9 @@ function updateReels(dt, finalReel) {
       else r.offset += diff * Math.min(1, dt * 14);
       if (Math.abs(r.target - r.offset) > 0.5) allDone = false;
     }
-    drawReel(r);
+    applyReel(r);
   });
-  if (reelSpinT > 0.8 + 2 * 0.55 && reels.every(r => Math.abs(r.target - r.offset) < 1)) {
-    return true;
-  }
-  return allDone && reels.every(r => r.target !== null) && allDone;
+  return allDone;
 }
 
 async function spin() {
@@ -523,10 +506,7 @@ document.getElementById("dm-collect").onclick = async () => {
 
 (async () => {
   buildReels();
-  loadSymbols(() => {
-    reels.forEach(drawReel);
-    renderPaytable();
-  });
+  renderPaytable();
   if (Store.token) {
     try {
       const { user } = await Api.me();

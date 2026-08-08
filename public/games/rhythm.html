@@ -3,11 +3,77 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>音乐游戏 8键 3D</title>
+<title>音乐游戏 8键</title>
 <link rel="stylesheet" href="/css/style.css">
-<script type="importmap">
-  { "imports": { "three": "/js/three.module.min.js" } }
-</script>
+<style>
+/* 舞台:860x520 逻辑坐标,整体缩放 */
+.rh-stage {
+  position: relative; width: 100%; max-width: 900px; margin: 0 auto;
+  aspect-ratio: 860 / 520; border-radius: 14px; overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 30%, #1c2340, #0b0e1e 70%);
+  box-shadow: inset 0 0 60px rgba(0,0,0,.6);
+}
+.rh-inner { position: absolute; inset: 0; transform-origin: top left; }
+/* 音轨 */
+.rh-lane {
+  position: absolute; top: 0; bottom: 0;
+  border-left: 1px solid rgba(255,255,255,.07); border-right: 1px solid rgba(255,255,255,.07);
+  transition: box-shadow .12s;
+}
+.rh-lane.flash { box-shadow: inset 0 0 30px rgba(255,255,255,.35); }
+/* 判定线 */
+.rh-hitline {
+  position: absolute; left: 4%; right: 4%; top: 470px; height: 5px; border-radius: 3px;
+  background: rgba(255,255,255,.8); box-shadow: 0 0 14px rgba(255,255,255,.7);
+  z-index: 4;
+}
+/* 音符 */
+.rh-note {
+  position: absolute; width: 44px; height: 44px; z-index: 3;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle at 35% 30%, #fff 0 12%, transparent 13%),
+    var(--nc);
+  clip-path: polygon(50% 0%, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%);
+  box-shadow: 0 0 14px var(--nc), inset 0 0 12px rgba(255,255,255,.25);
+  animation: note-spin .7s linear infinite;
+}
+@keyframes note-spin { to { transform: translate(-50%, -50%) rotate(360deg); } }
+.rh-note.hit {
+  animation: note-hit .3s ease-out forwards;
+}
+@keyframes note-hit {
+  to { transform: translate(-50%, -50%) scale(2.6); opacity: 0; }
+}
+/* 判定光圈 */
+.rh-ring {
+  position: absolute; top: 470px; width: 60px; height: 60px;
+  border: 4px solid #ffd54f; border-radius: 50%; z-index: 5; pointer-events: none;
+  transform: translate(-50%, -50%); opacity: 0;
+}
+.rh-ring.go { animation: ring-pop .3s ease-out forwards; }
+@keyframes ring-pop {
+  from { opacity: 1; transform: translate(-50%, -50%) scale(.6); }
+  to { opacity: 0; transform: translate(-50%, -50%) scale(2.6); }
+}
+/* 打击火花 */
+.rh-spark {
+  position: absolute; width: 8px; height: 8px; border-radius: 50%; z-index: 6; pointer-events: none;
+  animation: spark-fly .35s ease-out forwards;
+}
+@keyframes spark-fly {
+  to { transform: translate(var(--dx), var(--dy)); opacity: 0; }
+}
+/* 音符提示条 */
+.rh-keyhint {
+  position: absolute; left: 4%; right: 4%; top: 482px; display: flex; z-index: 4;
+}
+.rh-keyhint kbd {
+  flex: 1; text-align: center; font-size: 14px; padding: 4px 0;
+  background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.15);
+  border-radius: 8px; color: var(--muted); margin: 0 2px;
+}
+</style>
 </head>
 <body>
 <div class="game-wrap">
@@ -18,19 +84,25 @@
       <span class="stat">🎯 判定 <b id="hud-judge" style="color:var(--gold)">-</b></span>
       <span class="stat">精准 <b id="hud-acc">100%</b></span>
     </div>
-    <div id="stage"></div>
+    <div class="rh-stage" id="stage">
+      <div class="rh-inner" id="inner">
+        <div id="lanes"></div>
+        <div class="rh-hitline"></div>
+        <div id="notes-layer"></div>
+        <div class="rh-ring" id="ring"></div>
+        <div class="rh-keyhint"><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><kbd>F</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd><kbd>;</kbd></div>
+        <div id="fx-layer"></div>
+      </div>
+    </div>
     <div style="position:absolute;bottom:14px;left:0;right:0;display:flex;justify-content:center;z-index:6">
       <button class="btn" id="btn-start" style="font-size:17px;padding:12px 34px">▶ 开始演奏</button>
-    </div>
-    <div class="key-hint" style="position:absolute;bottom:80px;left:0;right:0;z-index:6">
-      <kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><kbd>F</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd><kbd>;</kbd>
     </div>
   </div>
 
   <div class="game-panel">
     <h2>📖 玩法</h2>
     <p style="color:var(--muted);line-height:2">
-      音符从 3D 深处向你飞来，到达判定线时按下对应按键。<b style="color:var(--ok)">Perfect +100</b> · <b style="color:var(--gold)">Good +60</b> · 漏掉算 Miss。<br>
+      音符从顶部向你飞来，到达判定线时按下对应按键。<b style="color:var(--ok)">Perfect +100</b> · <b style="color:var(--gold)">Good +60</b> · 漏掉算 Miss。<br>
       连击越高单次得分越高（最高 2 倍）。谱面由<b style="color:var(--accent2)">服务器随机生成</b>，防篡改防重放，约 80 秒一首。
     </p>
   </div>
@@ -41,98 +113,51 @@
 </div>
 
 <script src="/js/api.js"></script>
-<script type="module">
-import * as THREE from "three";
-
-gameShell("🎹 音乐游戏 · 8键 3D");
+<script>
+gameShell("🎹 音乐游戏 · 8键");
 initTopBar();
 
-/* ================= 场景 ================= */
+/* ================= DOM 场景(860x520 逻辑坐标) ================= */
+const W = 860, H = 520;
 const stage = document.getElementById("stage");
-const W_VIEW = 860, H_VIEW = 520;
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0b0e1e);
-scene.fog = new THREE.Fog(0x0b0e1e, 30, 70);
-const camera = new THREE.PerspectiveCamera(62, W_VIEW / H_VIEW, 0.1, 200);
-camera.position.set(0, 5.5, 8);
-camera.lookAt(0, 3, -20);
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(W_VIEW, H_VIEW);
-stage.appendChild(renderer.domElement);
-scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-const keyLight = new THREE.PointLight(0xffffff, 1, 60);
-keyLight.position.set(0, 20, 10);
-scene.add(keyLight);
+const inner = document.getElementById("inner");
+const notesLayer = document.getElementById("notes-layer");
+const fxLayer = document.getElementById("fx-layer");
+const ring = document.getElementById("ring");
+const stageEls = {};
 
-/* 星尘背景 */
-{
-  const n = 400;
-  const pos = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) {
-    pos[i * 3] = (Math.random() - 0.5) * 90;
-    pos[i * 3 + 1] = (Math.random() - 0.5) * 40;
-    pos[i * 3 + 2] = -10 - Math.random() * 70;
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color: 0x8b93b8, size: 0.25, transparent: true, opacity: .8 })));
+function fit() {
+  const s = stage.clientWidth / W;
+  inner.style.transform = `scale(${s})`;
 }
+window.addEventListener("resize", fit);
+fit();
 
 const LANES = 8;
-const COLORS = [0xff6b6b, 0xffa94d, 0xffd43b, 0x69db7c, 0x4dabf7, 0x9775fa, 0xf783ac, 0x63e6be];
-const LANE_W = 7.6;
+const COLORS = ["#ff6b6b", "#ffa94d", "#ffd43b", "#69db7c", "#4dabf7", "#9775fa", "#f783ac", "#63e6be"];
 const KEYS = ["KeyA", "KeyS", "KeyD", "KeyF", "KeyJ", "KeyK", "KeyL", "Semicolon"];
+const MARGIN_X = 30, LANE_W = (W - MARGIN_X * 2) / LANES;
+function laneCenter(i) { return MARGIN_X + i * LANE_W + LANE_W / 2; }
 
-/* 音轨平面 + 判定线 */
-const lanes3d = [];
-for (let i = 0; i < LANES; i++) {
-  const x = (i - 3.5) * LANE_W;
-  const mat = new THREE.MeshStandardMaterial({
-    color: COLORS[i], emissive: COLORS[i], emissiveIntensity: 0.25, transparent: true, opacity: 0.28 });
-  const plane = new THREE.Mesh(new THREE.PlaneGeometry(LANE_W - 0.7, 60), mat);
-  plane.position.set(x, 3, -30);
-  scene.add(plane);
-  lanes3d.push(plane);
-}
-const hitLine = new THREE.Mesh(new THREE.BoxGeometry(LANES * LANE_W, 0.35, 0.35),
-  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.75 }));
-hitLine.position.set(0, 0.25, -1.2);
-scene.add(hitLine);
-const glowRing = new THREE.Mesh(new THREE.TorusGeometry(3.2, 0.14, 8, 48),
-  new THREE.MeshBasicMaterial({ color: 0xffd54f, transparent: true, opacity: 0.9, depthWrite: false }));
-glowRing.rotation.x = Math.PI / 2;
-glowRing.position.set(0, 0.2, -1.2);
-glowRing.visible = false;
-scene.add(glowRing);
-
-/* 粒子爆发 */
-function makeBurst(n, color) {
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(n * 3), 3));
-  const mat = new THREE.PointsMaterial({ color, size: 0.5, transparent: true, opacity: 0, depthWrite: false });
-  const pts = new THREE.Points(geo, mat);
-  scene.add(pts);
-  return { pts, geo, mat, vels: new Float32Array(n * 3), life: 0 };
-}
-const burst = makeBurst(50, 0xffd54f);
-function burstAt(x, y, z, color) {
-  burst.mat.color.setHex(color);
-  burst.life = 1;
-  for (let i = 0; i < 50; i++) {
-    burst.pts.geometry.attributes.position.array[i * 3] = x;
-    burst.pts.geometry.attributes.position.array[i * 3 + 1] = y;
-    burst.pts.geometry.attributes.position.array[i * 3 + 2] = z;
-    const a = Math.random() * Math.PI * 2;
-    burst.vels[i * 3] = Math.cos(a) * 8;
-    burst.vels[i * 3 + 1] = 3 + Math.random() * 8;
-    burst.vels[i * 3 + 2] = (Math.random() - 0.5) * 4;
+/* 音轨 DOM */
+(function buildLanes() {
+  const box = document.getElementById("lanes");
+  for (let i = 0; i < LANES; i++) {
+    const d = document.createElement("div");
+    d.className = "rh-lane";
+    d.style.left = (MARGIN_X + i * LANE_W) + "px";
+    d.style.width = LANE_W + "px";
+    d.style.background = `linear-gradient(180deg, ${COLORS[i]}22, ${COLORS[i]}0a 60%, ${COLORS[i]}33)`;
+    d.dataset.lane = i;
+    box.appendChild(d);
   }
-  burst.pts.geometry.attributes.position.needsUpdate = true;
-}
+  stageEls.lanes = Array.from(box.children);
+})();
 
 /* ================= 音频 ================= */
 let audioCtx = null;
 function beep(freq, dur = 0.08, vol = 0.2, when = 0) {
+  if (!audioCtx) return;
   const o = audioCtx.createOscillator();
   const g = audioCtx.createGain();
   o.type = "square";
@@ -157,13 +182,13 @@ function scheduleBeat(bpm) {
 /* ================= 游戏状态 ================= */
 const BPM = 132;
 let chart = [];
-let noteMeshes = new Map();  // note.t -> mesh
+let noteEls = new Map();   // note.t -> el
 let running = false, over = false, submitted = false;
 let songStart = 0, score = 0, combo = 0, maxCombo = 0, perfects = 0, goods = 0, misses = 0, total = 0;
 let judgeText = null;
 let gameToken = "", maxScore = 0;
 const APPROACH = 1.9;
-const SPAWN_Z = -58, HIT_Z = -1.2;
+const SPAWN_Y = -46, HIT_Y = 470;
 
 function startGame() {
   if (!requireLogin()) return;
@@ -172,8 +197,9 @@ function startGame() {
     chart = r.chart;
     gameToken = r.token;
     maxScore = r.max_score;
-    noteMeshes.forEach(m => scene.remove(m));
-    noteMeshes.clear();
+    noteEls.forEach(el => el.remove());
+    noteEls.clear();
+    fxLayer.innerHTML = "";
     score = 0; combo = 0; maxCombo = 0; perfects = 0; goods = 0; misses = 0; total = 0;
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === "suspended") audioCtx.resume();
@@ -186,6 +212,23 @@ function startGame() {
   }).catch(e => toast(e.message, "err"));
 }
 
+/* 打击特效 */
+function sparkAt(x, y, color, n = 14) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 40 + Math.random() * 90;
+    const d = document.createElement("div");
+    d.className = "rh-spark";
+    d.style.background = color;
+    d.style.left = x + "px";
+    d.style.top = y + "px";
+    d.style.setProperty("--dx", Math.cos(a) * sp + "px");
+    d.style.setProperty("--dy", Math.sin(a) * sp - 30 + "px");
+    fxLayer.appendChild(d);
+    setTimeout(() => d.remove(), 400);
+  }
+}
+
 /* ================= 判定 ================= */
 function judge(keyIdx) {
   if (!running || over) return;
@@ -194,28 +237,28 @@ function judge(keyIdx) {
   if (!cand.length) return;
   const n = cand.reduce((a, b) => Math.abs(a.t - now) < Math.abs(b.t - now) ? a : b);
   const dt = n.t - now;
-  if (Math.abs(dt) < 0.06) hitNote(n, "Perfect", 100, 0x43e97b, "#43e97b");
-  else if (Math.abs(dt) < 0.16) hitNote(n, "Good", 60, 0xffc94d, "#ffc94d");
+  if (Math.abs(dt) < 0.06) hitNote(n, "Perfect", 100, "#43e97b");
+  else if (Math.abs(dt) < 0.16) hitNote(n, "Good", 60, "#ffc94d");
   else if (dt > 0.16) return;
   else missNote(n);
 }
 
-function hitNote(n, label, base, hex, css) {
+function hitNote(n, label, base, css) {
   n.hit = true;
   score += Math.round(base * (1 + Math.min(combo, 100) / 100));
   combo++; maxCombo = Math.max(maxCombo, combo);
   total++;
   label === "Perfect" ? perfects++ : goods++;
-  const x = (n.lane - 3.5) * LANE_W;
-  burstAt(x, 1, HIT_Z, hex);
-  const m = noteMeshes.get(n.t);
-  if (m) m.userData.burst = 1;
-  lanes3d[n.lane].material.emissiveIntensity = 1.4;
-  setTimeout(() => { if (lanes3d[n.lane]) lanes3d[n.lane].material.emissiveIntensity = 0.25; }, 120);
-  glowRing.visible = true;
-  glowRing.scale.setScalar(1);
-  glowRing.position.x = x;
-  setTimeout(() => glowRing.visible = false, 140);
+  const x = laneCenter(n.lane);
+  sparkAt(x, HIT_Y, css);
+  const el = noteEls.get(n.t);
+  if (el) { el.classList.add("hit"); setTimeout(() => el.remove(), 320); }
+  const lane = stageEls.lanes[n.lane];
+  lane.classList.add("flash");
+  setTimeout(() => lane.classList.remove("flash"), 120);
+  ring.style.left = x + "px";
+  ring.classList.remove("go"); void ring.offsetWidth;
+  ring.classList.add("go");
   judgeText = { label, color: css, t: performance.now() };
   beep(440 + n.lane * 60, 0.09, 0.25);
   hud();
@@ -229,75 +272,33 @@ function missNote(n) {
 }
 
 /* ================= 主循环 ================= */
-const clock = new THREE.Clock();
-let camT = 0;
-function animate() {
+function noteY(n, now) {
+  const toHit = n.t - now;
+  const p = Math.min(1, Math.max(0, 1 - toHit / APPROACH));
+  return SPAWN_Y + (HIT_Y - SPAWN_Y) * p;
+}
+
+function animate(t) {
   requestAnimationFrame(animate);
-  const dt = Math.min(0.05, clock.getDelta() || 0.016);
-  camT += dt;
-  camera.position.x = Math.sin(camT * 0.3) * 1.2;
-  camera.position.y = 5.5 + Math.sin(camT * 0.5) * 0.4;
-  camera.lookAt(0, 3, -20);
-
-  if (running && audioCtx) {
-    const now = audioCtx.currentTime - songStart;
-    if (now > 82) { finish(); }
-    chart.forEach(n => {
-      if (!n.hit && n.t < now - 0.2) missNote(n);
-      if (n.hit) return;
-      const toHit = n.t - now;
-      if (toHit < -0.3 || toHit > APPROACH + 1) return;
-      let mesh = noteMeshes.get(n.t);
-      if (!mesh) {
-        mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.75),
-          new THREE.MeshStandardMaterial({
-            color: COLORS[n.lane], emissive: COLORS[n.lane],
-            emissiveIntensity: 0.8, metalness: .3, roughness: .3 }));
-        mesh.position.x = (n.lane - 3.5) * LANE_W;
-        mesh.position.y = 1;
-        mesh.position.z = SPAWN_Z;
-        scene.add(mesh);
-        noteMeshes.set(n.t, mesh);
-      }
-      const p = 1 - toHit / APPROACH;
-      mesh.position.z = SPAWN_Z + (HIT_Z - SPAWN_Z) * p;
-      mesh.rotation.x += dt * 4;
-      mesh.rotation.y += dt * 3;
-      const s = 1 + Math.min(0.5, (1 - p) * 0.4);
-      mesh.scale.setScalar(s);
-      if (mesh.userData.burst) {
-        mesh.userData.burst -= dt * 3;
-        mesh.scale.setScalar(2.4);
-        if (mesh.userData.burst <= 0) {
-          scene.remove(mesh);
-          noteMeshes.delete(n.t);
-        }
-      }
-    });
-  }
-
-  if (burst.life > 0) {
-    burst.life -= dt;
-    burst.mat.opacity = Math.max(0, burst.life);
-    const arr = burst.pts.geometry.attributes.position.array;
-    for (let i = 0; i < arr.length; i += 3) {
-      arr[i] += burst.vels[i] * dt;
-      arr[i + 1] += burst.vels[i + 1] * dt;
-      arr[i + 2] += burst.vels[i + 2] * dt;
-      burst.vels[i + 1] -= 14 * dt;
+  if (!running || !audioCtx) return;
+  const now = audioCtx.currentTime - songStart;
+  if (now > 82) { finish(); return; }
+  chart.forEach(n => {
+    if (!n.hit && n.t < now - 0.2) missNote(n);
+    if (n.hit) return;
+    const toHit = n.t - now;
+    if (toHit < -0.3 || toHit > APPROACH + 1) return;
+    let el = noteEls.get(n.t);
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "rh-note";
+      el.style.left = laneCenter(n.lane) + "px";
+      el.style.setProperty("--nc", COLORS[n.lane]);
+      notesLayer.appendChild(el);
+      noteEls.set(n.t, el);
     }
-    burst.pts.geometry.attributes.position.needsUpdate = true;
-  } else {
-    burst.mat.opacity = 0;
-  }
-
-  if (glowRing.visible) {
-    const k = 1 + dt * 6;
-    glowRing.scale.setScalar(Math.min(k, 4));
-    glowRing.material.opacity = Math.max(0, glowRing.material.opacity - dt * 3);
-  }
-
-  renderer.render(scene, camera);
+    el.style.top = noteY(n, now) + "px";
+  });
   if (over) hud();
 }
 

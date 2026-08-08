@@ -75,6 +75,31 @@
 .win-glow.on { animation: pulse .8s ease-out; }
 @keyframes pulse { 0% { opacity: 1; } 100% { opacity: 0; } }
 .result-banner { text-align: center; font-size: 22px; font-weight: 800; min-height: 34px; margin-top: 12px; }
+/* 大奖轮播 */
+.jackpot-ticker {
+  height: 110px; overflow: hidden; position: relative;
+  background: rgba(0,0,0,.25); border: 1px solid rgba(255,201,77,.2);
+  border-radius: 10px;
+}
+.jackpot-ticker::before, .jackpot-ticker::after {
+  content: ""; position: absolute; left: 0; right: 0; height: 16px; z-index: 2; pointer-events: none;
+}
+.jackpot-ticker::before { top: 0; background: linear-gradient(180deg, rgba(10,8,20,.9), transparent); }
+.jackpot-ticker::after { bottom: 0; background: linear-gradient(0deg, rgba(10,8,20,.9), transparent); }
+.jackpot-ticker ul {
+  list-style: none; margin: 0; padding: 6px 0;
+  animation: ticker-up 24s linear infinite;
+}
+.jackpot-ticker:hover ul { animation-play-state: paused; }
+.jackpot-ticker li {
+  padding: 5px 12px; font-size: 13px; color: #ffd97a;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.jackpot-ticker li b { color: #fff; }
+@keyframes ticker-up {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(-50%); }
+}
 </style>
 </head>
 <body>
@@ -116,6 +141,19 @@
   </div>
 
   <div class="game-panel">
+    <h2>📊 全站转盘统计</h2>
+    <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:10px">
+      <span class="stat">🎡 全站共转 <b id="stat-total" class="big">-</b> 次</span>
+      <span class="stat">👤 我的次数 <b id="stat-mine">-</b> 次</span>
+      <span class="stat">📈 全站中奖率 <b id="stat-winrate" style="color:var(--ok)">-</b></span>
+    </div>
+    <h2 style="font-size:15px;margin:8px 0 6px">🏆 大奖轮播（+50 / +100）</h2>
+    <div class="jackpot-ticker" id="jackpot-ticker">
+      <ul id="jackpot-list"></ul>
+    </div>
+  </div>
+
+  <div class="game-panel">
     <h2>🏆 积分排行榜</h2>
     <ul class="rank-list" id="rank-list"></ul>
   </div>
@@ -152,9 +190,7 @@ window.addEventListener("resize", layout);
 
 /* ================= 旋转 ================= */
 let rot = 0;              // 当前角度(弧度)
-let speed = 0;            // 角速度
 let spinning = false;
-let target = 0;           // 目标角度
 
 function applyRot() {
   disc.style.transform = "rotate(" + (rot * 180 / Math.PI) + "deg)";
@@ -190,6 +226,7 @@ function onRest() {
   }
   refreshPoints();
   refreshRank();
+  refreshStats();
   hud();
 }
 
@@ -214,34 +251,29 @@ async function spin() {
     const cur = Math.atan2(Math.sin(rot), Math.cos(rot));
     let diff = t - cur;
     while (diff < 0) diff += Math.PI * 2;
-    diff += Math.PI * 2 * (5 + Math.floor(Math.random() * 3));
-    target = rot + diff;
-    speed = 11 + Math.random() * 2.5;
+    diff += Math.PI * 2 * (5 + Math.floor(Math.random() * 3));   // 5~7 圈
+    spinStart = rot;
+    spinTotal = diff;
+    spinT0 = performance.now();
+    spinDur = 3400 + Math.random() * 500;
   } catch (e) {
     toast(e.message, "err");
     hud();
   }
 }
 
-/* ================= 动画 ================= */
-let last = 0;
+/* ================= 动画(缓动曲线,平滑转完指定角度) ================= */
+let spinStart = 0, spinTotal = 0, spinT0 = 0, spinDur = 0;
 function animate(t) {
   requestAnimationFrame(animate);
-  const dt = Math.min(0.05, (t - last) / 1000 || 0.016);
-  last = t;
   if (!spinning) return;
-  if (speed > 0) {
-    rot += speed * dt;
-    speed *= 0.985;
-    if (speed < 0.22) {
-      const snap = Math.atan2(Math.sin(target - rot), Math.cos(target - rot));
-      rot += snap * Math.min(1, dt * 8);
-      if (Math.abs(snap) < 0.004) {
-        spinning = false;
-        rot = target;
-        onRest();
-      }
-    }
+  const p = Math.min(1, (t - spinT0) / spinDur);
+  const e = 1 - Math.pow(1 - p, 3);            // easeOutCubic:快→慢,结束时精确停住
+  rot = spinStart + spinTotal * e;
+  if (p >= 1) {
+    spinning = false;
+    rot = spinStart + spinTotal;
+    onRest();
   }
   applyRot();
 }
@@ -250,6 +282,32 @@ requestAnimationFrame(animate);
 /* ================= 初始化 ================= */
 async function refreshRank() {
   try { await renderLeaderboard(document.getElementById("rank-list"), { type: "points" }); } catch (e) {}
+}
+
+/* 全站转盘统计:总次数 / 我的次数 / 中奖率 / 大奖轮播 */
+function fmtTime(ts) {
+  const d = Math.floor((Date.now() / 1000 - ts) / 60);
+  if (d < 1) return "刚刚";
+  if (d < 60) return d + " 分钟前";
+  const h = Math.floor(d / 60);
+  if (h < 24) return h + " 小时前";
+  return Math.floor(h / 24) + " 天前";
+}
+async function refreshStats() {
+  if (!Store.token) return;
+  try {
+    const s = await Api.wheelStats();
+    document.getElementById("stat-total").textContent = s.total;
+    document.getElementById("stat-mine").textContent = s.my_spins;
+    document.getElementById("stat-winrate").textContent = s.win_rate + "%";
+    const ticker = document.getElementById("jackpot-list");
+    if (s.jackpots.length) {
+      const row = j => `<li>🏆 <b>${escapeHtml(j.username)}</b> 转到 ${escapeHtml(j.name)} · ${fmtTime(j.created_at)}</li>`;
+      ticker.innerHTML = s.jackpots.map(row).join("") + s.jackpots.map(row).join("");  // 两遍无缝轮播
+    } else {
+      ticker.innerHTML = "<li style='color:var(--muted)'>暂无大奖记录，快来开第一炮！</li>";
+    }
+  } catch (e) {}
 }
 
 document.getElementById("btn-spin").addEventListener("click", spin);
@@ -263,6 +321,7 @@ document.getElementById("spin-btn").addEventListener("click", spin);
   }
   hud();
   refreshRank();
+  refreshStats();
 })();
 </script>
 </body>

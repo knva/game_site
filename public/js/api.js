@@ -55,8 +55,11 @@ const Api = {
   farmUpgrade: (slot) => Api.post("/api/farm/upgrade", { slot }),
   farmBuilding: (name) => Api.post("/api/farm/building", { name }),
   farmSteal: (target, slot) => Api.post("/api/farm/steal", { target, slot }),
+  farmStealToggle: (open) => Api.post("/api/farm/steal-toggle", { open }),
+  farmStealRandom: () => Api.get("/api/farm/steal-random"),
 
   spin: () => Api.post("/api/wheel/spin"),
+  wheelStats: () => Api.get("/api/wheel/stats"),
   slotSpin: () => Api.post("/api/slot/spin"),
   slotDouble: (token) => Api.post("/api/slot/double", { token }),
   slotCollect: (token) => Api.post("/api/slot/collect", { token }),

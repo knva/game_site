@@ -12,7 +12,7 @@
   border-radius: 8px; padding: 1px 7px;
 }
 .plot.locked { opacity: .75; }
-.stamina-bar { width: 160px; height: 12px; background: var(--panel2); border-radius: 6px; overflow: hidden; display: inline-block; vertical-align: middle; }
+.stamina-bar { width: 130px; height: 12px; background: var(--panel2); border-radius: 6px; overflow: hidden; display: inline-block; vertical-align: middle; }
 .stamina-bar i { display: block; height: 100%; background: linear-gradient(90deg, #43e97b, #7c5cff); border-radius: 6px; transition: width .5s; }
 .cap-bar { height: 10px; background: var(--panel2); border-radius: 5px; overflow: hidden; }
 .cap-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--gold), var(--accent2)); transition: width .5s; }
@@ -22,45 +22,158 @@
 .bld-row .b-emoji { font-size: 28px; }
 .bld-row .b-info { flex: 1; font-size: 13px; }
 .bld-row .b-lv { color: var(--gold); font-weight: 700; }
+/* 修复:覆盖 style.css 里 .farm-grid 的 min-width:420px / repeat(4,1fr),防止网格溢出遮挡 */
+.farm-grid {
+  min-width: 0; flex: none; width: 100%;
+  grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+  gap: 10px;
+}
+/* 格子:宽随列,高固定,禁止 aspect-ratio 把格子撑出列宽(否则相邻格重叠) */
+.plot { aspect-ratio: auto; min-height: 130px; }
+/* 响应式三栏:宽屏并排,窄屏自动堆叠,任何窗口不挤压 */
+.farm-layout { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+.farm-layout .col-left { flex: 1 1 700px; min-width: 0; }
+.farm-layout .col-mid, .farm-layout .col-right { width: 300px; flex-shrink: 0; }
+.farm-layout .col-right { display: flex; flex-direction: column; gap: 16px; }
+@media (max-width: 1080px) {
+  .farm-layout .col-left, .farm-layout .col-mid, .farm-layout .col-right {
+    flex: 1 1 100%; width: 100%; min-width: 0;
+  }
+}
+/* 1080p 全屏下内容区加宽,避免外松内挤 */
+@media (min-width: 1400px) {
+  .game-wrap { max-width: 1380px; }
+}
+.plot { min-width: 0; overflow: hidden; }
+/* 顶部 tab */
+.tabbar { display: flex; gap: 8px; margin-bottom: 14px; }
+.tabbar .tab {
+  flex: 1; padding: 11px 0; border: 1px solid var(--line); background: var(--panel2);
+  color: var(--muted); border-radius: 12px; cursor: pointer; font-size: 15px; font-weight: 700;
+}
+.tabbar .tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* 中栏操作台 */
+.op-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px; flex-wrap: wrap; }
+.op-label { color: var(--muted); flex-shrink: 0; }
+.sel-seed {
+  font-size: 13px; color: var(--gold); background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 10px; padding: 8px 12px; min-height: 20px;
+}
+.btn-group { display: flex; gap: 8px; margin-top: 4px; }
+.btn-group .btn { flex: 1; }
+/* 种子商店 dialog */
+dialog.seed-dialog {
+  border: none; border-radius: 16px; padding: 20px; width: min(600px, 92vw);
+  background: var(--panel); color: var(--text);
+  box-shadow: 0 24px 80px rgba(0,0,0,.6);
+  margin: auto;   /* 全局 reset 清掉了 dialog 默认 margin,补回居中 */
+}
+dialog.seed-dialog::backdrop { background: rgba(0,0,0,.55); }
+.dialog-shop-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(125px, 1fr)); gap: 10px; max-height: 50vh; overflow-y: auto; }
+.dialog-shop-list .shop-item { cursor: pointer; }
+.dialog-shop-list .shop-item.locked { opacity: .55; cursor: not-allowed; }
+.vip-badge { position: absolute; top: 2px; right: 2px; font-size: 13px; }
+.shop-item { position: relative; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+/* 地块悬浮提示 */
+.plot-tip {
+  position: fixed; z-index: 99; pointer-events: none; display: none;
+  background: rgba(10, 8, 24, .96); border: 1px solid var(--gold);
+  border-radius: 10px; padding: 10px 12px; font-size: 12px; line-height: 1.7;
+  color: var(--text); box-shadow: 0 8px 24px rgba(0,0,0,.6); max-width: 240px;
+  white-space: nowrap;
+}
+.plot-tip .t-title { font-size: 14px; font-weight: 800; color: #fff; margin-bottom: 2px; }
+.plot-tip .t-row { color: var(--muted); }
+.plot-tip .t-row b { color: var(--gold); }
+.plot-tip .t-ready { color: var(--ok); font-weight: 700; }
+/* 格子等级颜色:Lv.1 灰绿 → Lv.5 金 */
+.plot-lv1 { border-color: #5a7d5a; background: linear-gradient(160deg, rgba(90,125,90,.35), rgba(70,100,70,.22)); }
+.plot-lv2 { border-color: #4e9a51; background: linear-gradient(160deg, rgba(78,154,81,.38), rgba(50,120,60,.25)); }
+.plot-lv3 { border-color: #4a90d9; background: linear-gradient(160deg, rgba(74,144,217,.38), rgba(40,90,170,.25)); }
+.plot-lv4 { border-color: #9b59d0; background: linear-gradient(160deg, rgba(155,89,208,.40), rgba(120,50,180,.26)); }
+.plot-lv5 { border-color: #f0a830; background: linear-gradient(160deg, rgba(240,168,48,.42), rgba(200,130,20,.28)); box-shadow: 0 0 10px rgba(240,168,48,.25); }
+.plot { transition: border-color .2s, box-shadow .2s; }
+/* 用户等级徽章 */
+.lv-chip { display: inline-flex; align-items: center; gap: 4px; background: linear-gradient(135deg, #f0a830, #e07b2a); color: #3a2400; font-weight: 800; border-radius: 20px; padding: 2px 10px; font-size: 12px; }
+/* 偷菜开关 */
+.switch-btn.on { background: var(--ok); border-color: var(--ok); color: #fff; }
 </style>
 </head>
 <body>
 <div class="game-wrap">
   <div class="game-panel">
     <div class="hud">
+      <span class="lv-chip">⭐ Lv.<b id="hud-level">-</b></span>
       <span class="stat">💰 余额 <b id="hud-points" class="big">-</b></span>
-      <span class="stat">⚡ 体力 <b id="hud-stamina">-</b>
-        <span class="stamina-bar"><i id="stamina-fill" style="width:0%"></i></span>
-        <span id="stamina-next" style="color:var(--muted);font-size:12px"></span></span>
       <span style="flex:1"></span>
+      <span class="stat">⚡ 体力 <b id="hud-stamina">-</b>/<span id="hud-stamina-max">-</span>
+        <span class="stamina-bar"><i id="stamina-fill" style="width:0%"></i></span></span>
       <span class="stat">🏚 仓库 <b id="hud-cap">-</b>
-        <span class="cap-bar" style="width:120px"><i id="cap-fill" style="width:0%"></i></span></span>
+        <span class="cap-bar" style="width:110px"><i id="cap-fill" style="width:0%"></i></span></span>
     </div>
   </div>
 
+  <!-- 顶部 tab:仓库 / 市场 -->
+  <div class="game-panel">
+    <div class="tabbar">
+      <button class="tab active" data-tab="inv">🏚 仓库</button>
+      <button class="tab" data-tab="market">🏪 市场</button>
+    </div>
+    <div id="tab-inv"></div>
+    <div id="tab-market" style="display:none"></div>
+  </div>
+
   <div class="farm-layout">
-    <div>
-      <div class="farm-grid" id="farm-grid" style="grid-template-columns:repeat(5,1fr)"></div>
-      <div class="shop panel" style="width:auto;margin-top:16px">
-        <h2>🌰 种子商店 <span class="sub">点击选中种子，再点击空地播种</span></h2>
-        <div id="shop-list" style="display:flex;gap:10px;flex-wrap:wrap"></div>
+    <!-- 左栏:地块网格 -->
+    <div class="col-left">
+      <div class="farm-grid" id="farm-grid"></div>
+    </div>
+
+    <!-- 中栏:信息与操作 -->
+    <div class="col-mid">
+      <div class="panel">
+        <h2>🛠 信息与操作</h2>
+        <div class="op-row">
+          <span class="op-label">⚡ 体力</span>
+          <b id="op-stamina">-</b>
+          <span class="stamina-bar"><i id="op-stamina-fill" style="width:0%"></i></span>
+          <span id="op-stamina-next" style="color:var(--muted);font-size:12px"></span>
+        </div>
+        <div class="op-row">
+          <span class="op-label">🏚 仓库容量</span>
+          <b id="op-cap">-</b>
+          <span class="cap-bar" style="flex:1"><i id="op-cap-fill" style="width:0%"></i></span>
+        </div>
+        <div class="op-row">
+          <span class="op-label">🌰 当前选中</span>
+          <span class="sel-seed" id="sel-seed">未选种子</span>
+        </div>
+        <div class="btn-group">
+          <button class="btn" id="btn-shop">🛒 种子商店</button>
+        </div>
+        <div class="btn-group">
+          <button class="btn mini" id="btn-harvest-all" title="收获所有成熟作物">🌾 一键收</button>
+          <button class="btn mini" id="btn-plant-all" title="所有空地种上当前选中种子">🌱 一键种</button>
+        </div>
+        <p style="color:var(--muted);font-size:12px;line-height:1.8;margin-top:8px">
+          点空地播种 · 未成熟可浇水加速 · 收获入仓库，市场出售换积分。
+        </p>
       </div>
     </div>
 
-    <div style="width:280px;flex-shrink:0;display:flex;flex-direction:column;gap:16px">
-      <div class="panel">
-        <h2>🏚 仓库（容量/出售）</h2>
-        <div id="inv-box"></div>
-        <p style="color:var(--muted);font-size:12px;line-height:1.8;margin-top:6px">
-          收获的作物存入仓库，出售换取积分。<br>仓库等级越高：容量越大、售价越高。
-        </p>
-      </div>
+    <!-- 右栏:建筑升级 + 偷菜区 -->
+    <div class="col-right">
       <div class="panel">
         <h2>🏗 建筑升级</h2>
         <div id="bld-box"></div>
       </div>
       <div class="panel">
-        <h2>🕵️ 去偷菜 <span class="sub">消耗 5 体力，得 40% 收益</span></h2>
+        <h2>🕵️ 偷菜区 <span class="sub">消耗 5 体力 · 得 40% 收益</span></h2>
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <button class="btn mini" id="btn-steal-toggle">开启偷菜</button>
+          <button class="btn mini" id="btn-random">🎲 随机找目标</button>
+        </div>
         <div style="display:flex;gap:8px">
           <input id="steal-target" placeholder="输入玩家昵称" style="flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:10px;padding:9px 12px;outline:none">
           <button class="btn mini" id="btn-look">查看</button>
@@ -71,56 +184,123 @@
   </div>
 </div>
 
+<!-- 地块悬浮提示 -->
+<div class="plot-tip" id="plot-tip"></div>
+
+<!-- 种子商店弹窗 -->
+<dialog class="seed-dialog" id="seed-dialog">
+  <h2 style="margin:0 0 4px">🌰 种子商店</h2>
+  <p style="color:var(--muted);font-size:12px;margin:0 0 12px">点击选中种子，确定后即可播种到空地</p>
+  <div id="dialog-shop-list" class="dialog-shop-list"></div>
+  <div class="dialog-actions">
+    <button class="btn gray mini" id="btn-shop-cancel">取消</button>
+    <button class="btn mini" id="btn-shop-ok">确定</button>
+  </div>
+</dialog>
+
 <script src="/js/api.js"></script>
 <script>
 gameShell("🌱 开心农场");
 initTopBar();
 
 let farm = null;
-let selected = null;
+let selected = null;        // 当前选中的种子(作物 key)
+let dialogSelected = null;  // 商店弹窗里暂选的种子
+let busy = false;           // 批量操作进行中
 let myPoints = 0;
-const IMGS = { carrot: "🥕", tomato: "🍅", corn: "🌽", watermelon: "🍉" };
+let myVip = false;          // 是否 VIP
+let viewFarm = null;
 
 function hud() {
   document.getElementById("hud-points").textContent = myPoints;
+  document.getElementById("hud-level").textContent = farm ? farm.level : "-";
   if (farm) {
     const s = farm.stamina;
     const pct = Math.round(s.current / s.max * 100);
-    document.getElementById("hud-stamina").textContent = `${s.current}/${s.max}`;
+    document.getElementById("hud-stamina").textContent = s.current;
+    document.getElementById("hud-stamina-max").textContent = s.max;
     document.getElementById("stamina-fill").style.width = pct + "%";
-    document.getElementById("stamina-next").textContent =
-      s.current >= s.max ? "已满" : `+1/${Math.ceil(s.next_in / 60)}分`;
     document.getElementById("hud-cap").textContent = `${farm.capacity_used}/${farm.capacity}`;
     document.getElementById("cap-fill").style.width = Math.min(100, farm.capacity_used / farm.capacity * 100) + "%";
+    /* 中栏操作台 */
+    document.getElementById("op-stamina").textContent = `${s.current}/${s.max}`;
+    document.getElementById("op-stamina-fill").style.width = pct + "%";
+    document.getElementById("op-stamina-next").textContent =
+      s.current >= s.max ? "已满" : `+1/${Math.ceil(s.next_in / 60)}分`;
+    document.getElementById("op-cap").textContent = `${farm.capacity_used}/${farm.capacity}`;
+    document.getElementById("op-cap-fill").style.width = Math.min(100, farm.capacity_used / farm.capacity * 100) + "%";
   }
 }
 
-function renderShop() {
-  document.getElementById("shop-list").innerHTML = Object.entries(farm.crops).map(([k, c]) => `
-    <div class="shop-item" data-crop="${k}" style="${selected === k ? "border-color:var(--ok)" : ""}">
-      <span class="si-emoji">${c.emoji}</span>
-      <div>
-        <div class="si-name">${c.name}</div>
-        <div class="si-info">种子${c.cost}💎 → 卖${farm.sell_prices[k]}💎<br>生长${c.grow_seconds}秒 · 占${c.size}格</div>
-      </div>
-    </div>`).join("");
-  document.querySelectorAll(".shop-item").forEach(el => {
-    el.onclick = () => { selected = el.dataset.crop; renderShop(); };
-  });
+function renderSelSeed() {
+  const el = document.getElementById("sel-seed");
+  el.textContent = selected
+    ? `${farm.crops[selected].emoji} ${farm.crops[selected].name}(${farm.crops[selected].cost}💎)`
+    : "未选种子";
 }
 
+/* ============ 种子商店(dialog) ============ */
+const dialog = document.getElementById("seed-dialog");
+function renderShopList() {
+  const vip = c => c.vip ? "👑 VIP" : "";
+  const locked = c => c.vip && !myVip;
+  document.getElementById("dialog-shop-list").innerHTML = Object.entries(farm.crops).map(([k, c]) => `
+    <div class="shop-item ${locked(c) ? "locked" : ""}" data-crop="${k}" style="${dialogSelected === k ? "border-color:var(--ok)" : ""}">
+      <span class="si-emoji">${c.emoji}${c.vip ? '<span class="vip-badge">👑</span>' : ""}</span>
+      <div>
+        <div class="si-name">${c.name} ${vip(c)}</div>
+        <div class="si-info">${locked(c) ? "🔒 VIP 专属 · 开通 VIP 可种" : `种子${c.cost}💎 → 卖${farm.sell_prices[k]}💎<br>生长${c.grow}秒 · 占 1 格`}</div>
+      </div>
+    </div>`).join("");
+  document.querySelectorAll("#dialog-shop-list .shop-item").forEach(el => {
+    el.onclick = () => {
+      const k = el.dataset.crop;
+      if (farm.crops[k].vip && !myVip) { toast("🔒 这是 VIP 专属作物，开通 VIP 后才能种植", "err"); return; }
+      dialogSelected = k;
+      renderShopList();
+    };
+  });
+}
+function openShop() {
+  if (!farm) return;
+  dialogSelected = selected;
+  renderShopList();
+  if (!dialog.open) dialog.showModal();
+}
+document.getElementById("btn-shop").onclick = openShop;
+document.getElementById("btn-shop-ok").onclick = () => {
+  if (!dialogSelected) { toast("先选一个种子", "err"); return; }
+  selected = dialogSelected;
+  renderSelSeed();
+  dialog.close();
+  toast(`已选择种子：${farm.crops[selected].name}`, "ok");
+};
+document.getElementById("btn-shop-cancel").onclick = () => dialog.close();
+
+/* ============ 地块渲染 ============ */
+/* 地块速度倍率:有作物用 base/grow(含温室);空地按等级 1/(1-0.05*(lv-1)) */
+function plotMult(p) {
+  if (p.crop) {
+    const base = farm.crops[p.crop].grow;
+    return (base / p.grow_seconds).toFixed(2);
+  }
+  return (1 / (1 - 0.05 * (p.level - 1))).toFixed(2);
+}
 function plotHTML(p) {
   const { slot } = p;
   if (!p.unlocked) {
-    return `<div class="plot locked" data-slot="${slot}" data-act="unlock">
+    const locked = farm.level < p.unlock_level ? `<span style="color:var(--bad)">需 Lv.${p.unlock_level}</span>` : "";
+    return `<div class="plot locked plot-lv${Math.min(5, p.unlock_level)}" data-slot="${slot}" data-act="unlock">
       <span class="plus">⛏️</span>
-      <span class="plot-label">未开垦 · ${p.unlock_cost}💎</span>
+      <span class="plot-label">${locked || `开地 ${p.unlock_cost}💎`}</span>
+      ${locked ? "" : `<span class="plot-label" style="font-size:11px">等级 ${p.unlock_level} 可开</span>`}
     </div>`;
   }
   const pct = Math.round(p.progress * 100);
   if (!p.crop) {
-    return `<div class="plot empty" data-slot="${slot}">
+    return `<div class="plot empty plot-lv${p.level}" data-slot="${slot}">
       <span class="lv-badge">Lv.${p.level}</span>
+      <span class="mult-badge">×${plotMult(p)}</span>
       <span class="plus">＋</span>
       <span class="plot-label">空地 · 点击播种</span>
       ${p.level < 5 ? `<button class="mini-btn" data-act="upgrade" data-slot="${slot}" style="margin-top:4px">升级 ${farm.plot_upgrade_cost_dict[p.level]}💎</button>` : ""}
@@ -129,8 +309,9 @@ function plotHTML(p) {
   const done = p.ready;
   const emoji = done ? p.emoji : ["🌱", "🌿"][Math.min(1, Math.floor(p.progress * 4))];
   const stolen = p.stolen ? `<span style="color:var(--bad);font-size:11px">😢被${escapeHtml(p.stolen_by)}偷走</span>` : "";
-  return `<div class="plot" data-slot="${slot}">
+  return `<div class="plot plot-lv${p.level}" data-slot="${slot}">
     <span class="lv-badge">Lv.${p.level}</span>
+    <span class="mult-badge">×${plotMult(p)}</span>
     <span class="crop-emoji" style="filter:${done ? "none" : "grayscale(.4)"}">${emoji}</span>
     ${done ? "" : `<div class="grow-bar"><i style="width:${pct}%"></i></div>`}
     <span class="plot-label">${p.crop_name}${done ? " 熟了！" : ` ${pct}%`}</span>
@@ -142,9 +323,23 @@ function plotHTML(p) {
   </div>`;
 }
 
-function renderPlots(plots, stealMode) {
+function renderPlots(plots) {
   const grid = document.getElementById("farm-grid");
   grid.innerHTML = plots.map(plotHTML).join("");
+  /* 悬浮提示:地块信息(倍率/成熟时间等) */
+  const tip = document.getElementById("plot-tip");
+  grid.querySelectorAll(".plot").forEach(el => {
+    const slot = +el.dataset.slot;
+    const p = farm.plots.find(x => x.slot === slot);
+    if (!p) return;
+    el.addEventListener("mouseenter", ev => {
+      tip.innerHTML = plotTipHTML(p);
+      tip.style.display = "block";
+      moveTip(ev);
+    });
+    el.addEventListener("mousemove", moveTip);
+    el.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+  });
   grid.querySelectorAll("[data-act]").forEach(el => {
     el.onclick = async (ev) => {
       ev.stopPropagation();
@@ -157,13 +352,13 @@ function renderPlots(plots, stealMode) {
         else if (act === "harvest") r = await Api.farmHarvest(slot);
         else if (act === "water") r = await Api.farmWater(slot);
         if (r.farm) { farm = r.farm; myPoints = r.points ?? myPoints; renderAll(); refreshPoints(); }
-        if (act === "harvest") harvestFx(el.closest(".plot"), farm ? "🌾" : "");
+        if (act === "harvest") harvestFx(el.closest(".plot"));
       } catch (e) { toast(e.message, "err"); }
     };
   });
   grid.querySelectorAll(".plot.empty").forEach(el => {
     el.onclick = async () => {
-      if (!selected) { toast("先在商店选择种子", "err"); return; }
+      if (!selected) { toast("先在种子商店选择种子", "err"); return; }
       try {
         const r = await Api.farmPlant(+el.dataset.slot, selected);
         farm = r.farm; myPoints = r.points;
@@ -173,7 +368,7 @@ function renderPlots(plots, stealMode) {
   });
 }
 
-function harvestFx(plotEl, emoji) {
+function harvestFx(plotEl) {
   const fx = document.createElement("div");
   fx.className = "harvest-fx";
   fx.innerHTML = `<span class="f-emoji">🍀</span>`;
@@ -181,20 +376,121 @@ function harvestFx(plotEl, emoji) {
   setTimeout(() => fx.remove(), 900);
 }
 
+/* ============ 地块悬浮提示 ============ */
+function fmtSec(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return sec + " 秒";
+  if (sec < 3600) return Math.floor(sec / 60) + " 分 " + (sec % 60) + " 秒";
+  return Math.floor(sec / 3600) + " 小时";
+}
+function plotTipHTML(p) {
+  if (!p.unlocked) {
+    return `<div class="t-title">⛏️ 未开垦地块</div>
+      <div class="t-row">开地费用：<b>${p.unlock_cost}💎</b></div>`;
+  }
+  if (!p.crop) {
+    const up = p.level < 5 ? `<div class="t-row">升级 Lv.${p.level + 1}：<b>${farm.plot_upgrade_cost_dict[p.level]}💎</b></div>` : "";
+    return `<div class="t-title">🌱 空地 · Lv.${p.level}</div>${up}`;
+  }
+  const c = farm.crops[p.crop];
+  const base = c.grow;
+  const timeMult = p.grow_seconds / base;          // 时间倍率(<1 = 更快)
+  const speedMult = base / p.grow_seconds;         // 速度倍率(>1 = 更快)
+  const remain = p.ready ? 0 : Math.max(0, p.grow_seconds - p.elapsed);
+  const pct = Math.round(p.progress * 100);
+  const stolen = p.stolen ? `<div class="t-row">😢 被 <b>${escapeHtml(p.stolen_by)}</b> 偷走</div>` : "";
+  return `<div class="t-title">${p.emoji} ${p.crop_name} · 地块 Lv.${p.level}</div>
+    <div class="t-row">⏱ 时间倍率 <b>×${timeMult.toFixed(2)}</b>（速度 ×${speedMult.toFixed(2)}）</div>
+    <div class="t-row">⏳ 成熟时间 <b>${fmtSec(p.grow_seconds)}</b>${p.ready ? "" : ` · 剩余 ${fmtSec(remain)}（${pct}%）`}</div>
+    ${p.ready ? `<div class="t-ready">✅ 已成熟 · 收获 ${p.sell_value}💎</div>` : ""}
+    <div class="t-row">💧 浇水 ${p.waters}/${p.waters_limit}${p.ready ? "" : " · 点击浇水加速"}</div>
+    ${stolen}`;
+}
+function moveTip(ev) {
+  const tip = document.getElementById("plot-tip");
+  const pad = 14;
+  let x = ev.clientX + pad, y = ev.clientY + pad;
+  if (x + 240 > window.innerWidth) x = ev.clientX - 240 - pad;
+  if (y + 120 > window.innerHeight) y = ev.clientY - 120 - pad;
+  tip.style.left = x + "px";
+  tip.style.top = y + "px";
+}
+
+/* ============ 一键收 / 一键种 ============ */
+function setBusy(b) {
+  busy = b;
+  ["btn-plant-all", "btn-harvest-all", "btn-random", "btn-steal-toggle", "btn-look"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = b;
+  });
+}
+
+async function harvestAll() {
+  if (!requireLogin() || busy) return;
+  const ready = farm.plots.filter(p => p.unlocked && p.crop && p.ready && !p.stolen);
+  if (!ready.length) { toast("没有成熟作物可收", "info"); return; }
+  setBusy(true);
+  let ok = 0; const fails = [];
+  for (const p of ready) {
+    try {
+      const r = await Api.farmHarvest(p.slot);
+      farm = r.farm; myPoints = r.points;
+      ok++;
+    } catch (e) { if (fails.length < 3) fails.push(e.message); }
+  }
+  setBusy(false);
+  renderAll(); refreshPoints();
+  toast(ok ? `🌾 一键收获完成，收了 ${ok} 块地` : "没有收获成功", ok ? "ok" : "err");
+  fails.forEach(m => toast(m, "err"));
+}
+
+async function plantAll() {
+  if (!requireLogin() || busy) return;
+  if (!selected) { toast("先在种子商店选择种子", "err"); return; }
+  if (farm.crops[selected].vip && !myVip) { toast("🔒 VIP 专属作物，开通 VIP 后才能种植", "err"); return; }
+  const empties = farm.plots.filter(p => p.unlocked && !p.crop);
+  if (!empties.length) { toast("没有空地可种", "info"); return; }
+  setBusy(true);
+  let ok = 0; const fails = [];
+  for (const p of empties) {
+    try {
+      const r = await Api.farmPlant(p.slot, selected);
+      farm = r.farm; myPoints = r.points;
+      ok++;
+    } catch (e) { if (fails.length < 3) fails.push(e.message); }
+  }
+  setBusy(false);
+  renderAll(); refreshPoints();
+  toast(ok ? `🌱 一键播种完成，种了 ${ok} 块地` : "没有播种成功", ok ? "ok" : "err");
+  fails.forEach(m => toast(m, "err"));
+}
+
+document.getElementById("btn-harvest-all").onclick = harvestAll;
+document.getElementById("btn-plant-all").onclick = plantAll;
+
+/* ============ 顶部 tab:仓库 / 市场 ============ */
+const tabs = document.querySelectorAll(".tabbar .tab");
+tabs.forEach(t => t.onclick = () => {
+  tabs.forEach(x => x.classList.remove("active"));
+  t.classList.add("active");
+  const target = "tab-" + t.dataset.tab;
+  ["tab-inv", "tab-market"].forEach(id => document.getElementById(id).style.display = id === target ? "" : "none");
+});
+
 function renderInv() {
-  const box = document.getElementById("inv-box");
+  const box = document.getElementById("tab-inv");
   const inv = farm.inventory;
   const entries = Object.entries(inv);
   box.innerHTML = entries.length ? entries.map(([crop, count]) => `
     <div class="inv-row">
-      <span style="font-size:26px">${IMGS[crop]}</span>
+      <span style="font-size:26px">${farm.crops[crop].emoji}</span>
       <div style="flex:1">
         <div style="font-weight:700">${farm.crops[crop].name} × ${count}</div>
-        <div style="color:var(--muted);font-size:12px">单价 ${farm.sell_prices[crop]}💎</div>
+        <div style="color:var(--muted);font-size:12px">单价 ${farm.sell_prices[crop]}💎 · 占 1 格</div>
       </div>
       <button class="mini-btn primary" data-sell="${crop}">出售</button>
     </div>`).join("")
-    : `<p style="color:var(--muted);font-size:13px">仓库空空如也</p>`;
+    : `<p style="color:var(--muted);font-size:13px">仓库空空如也，去种点东西吧</p>`;
   box.querySelectorAll("[data-sell]").forEach(btn => {
     btn.onclick = async () => {
       try {
@@ -207,6 +503,34 @@ function renderInv() {
   });
 }
 
+function renderMarket() {
+  const box = document.getElementById("tab-market");
+  const inv = farm.inventory;
+  const rows = Object.entries(farm.crops).map(([k, c]) => `
+    <div class="inv-row">
+      <span style="font-size:26px">${c.emoji}</span>
+      <div style="flex:1">
+        <div style="font-weight:700">${c.name}</div>
+        <div style="color:var(--muted);font-size:12px">单价 ${farm.sell_prices[k]}💎 · 库存 ${inv[k] || 0} · 占 1 格</div>
+      </div>
+      <button class="mini-btn primary" data-sell="${k}" ${(inv[k] || 0) <= 0 ? "disabled" : ""}>出售</button>
+    </div>`).join("");
+  box.innerHTML = rows +
+    `<p style="color:var(--muted);font-size:12px;line-height:1.8;margin-top:6px">
+       市场出售作物换取积分，仓库等级越高售价越高。<br>今日收益有上限，满了就明天再来。</p>`;
+  box.querySelectorAll("[data-sell]").forEach(btn => {
+    btn.onclick = async () => {
+      try {
+        const r = await Api.farmSell(btn.dataset.sell);
+        farm = r.farm; myPoints = r.points;
+        renderAll(); refreshPoints();
+        toast(`出售成功 +${r.earned}💎`, "ok");
+      } catch (e) { toast(e.message, "err"); }
+    };
+  });
+}
+
+/* ============ 建筑 ============ */
 function renderBuildings() {
   document.getElementById("bld-box").innerHTML = Object.entries(farm.buildings).map(([name, lv]) => {
     const info = farm.buildings_info[name];
@@ -232,17 +556,36 @@ function renderBuildings() {
   });
 }
 
-function renderAll() {
+/* ============ 偷菜 ============ */
+function renderStealToggle() {
+  const btn = document.getElementById("btn-steal-toggle");
   if (!farm) return;
-  hud();
-  renderShop();
-  renderPlots(farm.plots, false);
-  renderInv();
-  renderBuildings();
-  if (viewFarm) renderStealTarget();
+  const on = !!farm.steal_open;
+  btn.textContent = on ? "偷菜已开启 ✓" : "偷菜已关闭";
+  btn.classList.toggle("switch-btn", on);
+  btn.classList.toggle("on", on);
 }
 
-let viewFarm = null;
+document.getElementById("btn-steal-toggle").onclick = async () => {
+  if (!requireLogin()) return;
+  const next = !farm.steal_open;
+  try {
+    const r = await Api.farmStealToggle(next);
+    farm.steal_open = r.steal_open;
+    renderStealToggle();
+    toast(r.steal_open ? "偷菜已开启，别人可以偷你的菜了" : "已关闭偷菜，别人偷不了你的菜了", "ok");
+  } catch (e) { toast(e.message, "err"); }
+};
+
+document.getElementById("btn-random").onclick = async () => {
+  if (!requireLogin()) return;
+  try {
+    viewFarm = await Api.farmStealRandom();
+    renderStealTarget();
+    toast(`随机目标:${viewFarm.owner}`, "ok");
+  } catch (e) { toast(e.message, "err"); }
+};
+
 document.getElementById("btn-look").onclick = async () => {
   if (!requireLogin()) return;
   const name = document.getElementById("steal-target").value.trim();
@@ -255,9 +598,11 @@ document.getElementById("btn-look").onclick = async () => {
 
 function renderStealTarget() {
   const box = document.getElementById("steal-box");
+  if (!viewFarm) return;
   const f = viewFarm;
-  if (!f) return;
+  const left = f.steal_daily_left;
   box.innerHTML = `<div style="font-weight:700;margin-bottom:8px">🎯 ${escapeHtml(f.owner)} 的农场
+    ${typeof left === "number" ? `<span style="color:var(--gold);font-size:12px">今日可偷 ${left} 次</span>` : ""}
     ${f.plots.some(p => p.ready && p.crop) ? "" : "<span style='color:var(--muted);font-size:12px'>（暂无成熟作物）</span>"}</div>`;
   const ready = f.plots.filter(p => p.unlocked && p.crop && p.ready && !p.stolen);
   box.innerHTML += ready.length ? ready.map(p => `
@@ -278,12 +623,26 @@ function renderStealTarget() {
   });
 }
 
+/* ============ 汇总渲染 ============ */
+function renderAll() {
+  if (!farm) return;
+  hud();
+  renderSelSeed();
+  renderPlots(farm.plots);
+  renderInv();
+  renderMarket();
+  renderBuildings();
+  renderStealToggle();
+  if (viewFarm) renderStealTarget();
+}
+
 async function load() {
   if (!requireLogin()) return;
   try {
     farm = await Api.farm();
     const { user } = await Api.me();
     myPoints = user.points;
+    myVip = !!user.vip;
     renderAll();
   } catch (e) { toast(e.message, "err"); }
 }

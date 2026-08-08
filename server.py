@@ -48,25 +48,40 @@ CROPS = {
     "tomato": {"name": "番茄", "emoji": "🍅", "cost": 10, "sell": 19, "grow": 45},
     "corn": {"name": "玉米", "emoji": "🌽", "cost": 25, "sell": 49, "grow": 90},
     "watermelon": {"name": "西瓜", "emoji": "🍉", "cost": 60, "sell": 120, "grow": 180},
+    "potato": {"name": "土豆", "emoji": "🥔", "cost": 40, "sell": 78, "grow": 120},
+    "eggplant": {"name": "茄子", "emoji": "🍆", "cost": 45, "sell": 88, "grow": 150},
+    "pumpkin": {"name": "南瓜", "emoji": "🎃", "cost": 55, "sell": 108, "grow": 165},
+    "pepper": {"name": "辣椒", "emoji": "🌶", "cost": 50, "sell": 98, "grow": 140},
+    "strawberry": {"name": "草莓", "emoji": "🍓", "cost": 70, "sell": 138, "grow": 200},
+    # VIP 专属(产量高、售价高)
+    "grape": {"name": "葡萄", "emoji": "🍇", "cost": 100, "sell": 210, "grow": 240, "vip": 1},
+    "peach": {"name": "蟠桃", "emoji": "🍑", "cost": 120, "sell": 250, "grow": 260, "vip": 1},
+    "melon": {"name": "蜜瓜", "emoji": "🍈", "cost": 150, "sell": 320, "grow": 300, "vip": 1},
 }
-PLOT_COUNT = 10
+PLOT_COUNT = 36
 DEFAULT_PLOTS = 2
 PLOT_MAX_LEVEL = 5
 PLOT_UPGRADE_BASE = 100       # 升级费用 = 等级 * base
 PLOT_GROW_CUT = 0.05          # 每级 -5% 生长时间
-PLOT_UNLOCK_COSTS = [0, 0, 60, 140, 260, 420, 640, 920, 1260, 1680]  # 第 0~9 块地的开地费用
-CROP_SIZE = {"carrot": 1, "tomato": 2, "corn": 4, "watermelon": 6}    # 占地容量（单位）
+# 第 0~35 块地的开地费用(前 2 块免费,之后二次方递增,非常消耗积分,全开约 274 万)
+PLOT_UNLOCK_COSTS = [0, 0, 200, 800, 1800, 3200, 5000, 7200, 9800, 12800, 16200, 20000, 24200, 28800,
+                     33800, 39200, 45000, 51200, 57800, 64800, 72200, 80000, 88200, 96800, 105800,
+                     115200, 125000, 135200, 145800, 156800, 168200, 180000, 192200, 204800, 217800, 231200]
+# 第 0~35 块地的开地等级要求(等级 + 积分 双重门槛,越靠后等级越高)
+PLOT_UNLOCK_LEVELS = [1, 1] + [2 + (s - 2) // 5 for s in range(2, 36)]
+CROP_SIZE = {c: 1 for c in CROPS}   # 果实统一占 1 格(不再按大小占地)
 WATER_SECONDS = 12          # 每次浇水加速的秒数
 WATER_LIMIT = 3             # 基础浇水次数（水井每级 +1）
 BUILDINGS = {
-    "storehouse": {"name": "仓库", "emoji": "🏚️", "desc": "每级 +35 容量、+6% 售价", "cost_base": 150},
+    "storehouse": {"name": "仓库", "emoji": "🏚️", "desc": "容量指数增长、每级 +6% 售价", "cost_base": 150},
     "well": {"name": "水井", "emoji": "⛲", "desc": "每级 +1 次浇水", "cost_base": 100},
     "greenhouse": {"name": "温室", "emoji": "🏡", "desc": "每级 -5% 生长时间", "cost_base": 150},
 }
 BUILDING_MAX_LEVEL = 5
-STORE_CAPACITY_BASE = 40      # 仓库基础容量（单位）
-STORE_CAPACITY_PER_LEVEL = 35 # 每级 +35 单位
+STORE_CAPACITY_BASE = 100     # 仓库基础容量(单位)
+STORE_CAPACITY_GROW = 1.45    # 每级容量 ×1.45(指数扩容)
 STORE_SELL_BONUS = 0.06       # 每级 +6% 售价
+BUILD_COST_GROW = 1.75        # 建筑升级费用指数基数(每级 ×1.75)
 
 STAMINA_MAX = 50
 STAMINA_REGEN_SECONDS = 300   # 每 5 分钟恢复 1 点
@@ -182,11 +197,18 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'active',
             created_at REAL NOT NULL,
             last_login REAL,
-            steal_open INTEGER NOT NULL DEFAULT 1)""")
-        # 迁移:老库补 steal_open 字段
+            steal_open INTEGER NOT NULL DEFAULT 0,
+            exp INTEGER NOT NULL DEFAULT 0)""")
+        # 迁移:老库补字段
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
         if "steal_open" not in cols:
-            conn.execute("ALTER TABLE users ADD COLUMN steal_open INTEGER NOT NULL DEFAULT 1")
+            conn.execute("ALTER TABLE users ADD COLUMN steal_open INTEGER NOT NULL DEFAULT 0")
+        elif "steal_open" in cols:
+            pass
+        if "exp" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN exp INTEGER NOT NULL DEFAULT 0")
+        if "steal_open" in cols:
+            conn.execute("UPDATE users SET steal_open=0 WHERE steal_open=1")
         conn.execute("""CREATE TABLE IF NOT EXISTS sessions(
             token TEXT PRIMARY KEY,
             user_id INTEGER NOT NULL,
@@ -308,6 +330,19 @@ def init_db():
             winner INTEGER,
             result TEXT NOT NULL,
             at REAL NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS wheel_logs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            sector INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            prize INTEGER NOT NULL,
+            created_at REAL NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS farm_seeds(
+            user_id INTEGER NOT NULL,
+            crop TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(user_id, crop))""")
         conn.commit()
 
 
@@ -404,9 +439,14 @@ def get_user_by_name(conn, name):
     return conn.execute("SELECT * FROM users WHERE username=?", (name,)).fetchone()
 
 
-# ---------------- 签到 / VIP ----------------
+# ---------------- 签到 / VIP / 等级 ----------------
 def is_vip(user_row):
     return bool(user_row["vip_until"] and user_row["vip_until"] > time.time())
+
+
+def user_level(user_row):
+    """用户等级 = floor(sqrt(exp/100)) + 1(100→2级,400→3级,900→4级,1600→5级…)"""
+    return int(math.sqrt(max(0, user_row["exp"]) / 100)) + 1
 
 
 def compute_streak(conn, user_id):
@@ -465,9 +505,14 @@ def building_level(conn, user_id, name):
 
 
 def farm_capacity(conn, user_id):
-    """仓库容量（单位）"""
+    """仓库容量(指数扩容):100 × 1.45^等级"""
     lv = building_level(conn, user_id, "storehouse")
-    return STORE_CAPACITY_BASE + lv * STORE_CAPACITY_PER_LEVEL
+    return round(STORE_CAPACITY_BASE * (STORE_CAPACITY_GROW ** lv))
+
+
+def building_upgrade_cost(name, lv):
+    """建筑升级费用(指数上涨):cost_base × 1.75^等级"""
+    return round(BUILDINGS[name]["cost_base"] * (BUILD_COST_GROW ** lv))
 
 
 def farm_sell_value(crop, storehouse_lv):
@@ -533,7 +578,8 @@ def farm_state(conn, user_id, viewer_id=None, viewer_name=""):
         lv = pr["level"] if pr else 1
         fr = farm_row.get(i)
         base = {"slot": i, "unlocked": unlocked, "level": lv,
-                "unlock_cost": PLOT_UNLOCK_COSTS[i] if not unlocked else 0}
+                "unlock_cost": PLOT_UNLOCK_COSTS[i] if not unlocked else 0,
+                "unlock_level": PLOT_UNLOCK_LEVELS[i]}
         if not unlocked:
             plots.append({**base, "crop": None})
             continue
@@ -561,14 +607,19 @@ def farm_state(conn, user_id, viewer_id=None, viewer_name=""):
 
     result = {
         "owner": user_row["username"],
+        "level": user_level(me_row if is_me else user_row),
+        "exp": me_row["exp"] if is_me else None,
+        "exp_next": None if not is_me else round((((user_level(me_row)) ** 2) * 100) - me_row["exp"]),
         "is_me": is_me,
         "plots": plots,
         "buildings": buildings,
         "buildings_info": {k: {**v, "max_level": BUILDING_MAX_LEVEL,
-                               "upgrade_cost": building_level(conn, user_id, k) * v["cost_base"] if
+                               "upgrade_cost": building_upgrade_cost(k, building_level(conn, user_id, k)) if
                                    building_level(conn, user_id, k) < BUILDING_MAX_LEVEL else None}
                            for k, v in BUILDINGS.items()},
         "inventory": inv,
+        "seeds": {r["crop"]: r["count"] for r in conn.execute(
+            "SELECT crop, count FROM farm_seeds WHERE user_id=? AND count>0", (user_id,)).fetchall()},
         "capacity": capacity,
         "capacity_used": units,
         "sell_prices": {c: farm_sell_value(c, sh) for c in CROPS},
@@ -577,9 +628,32 @@ def farm_state(conn, user_id, viewer_id=None, viewer_name=""):
         "stamina": stamina_state(conn, me_row) if is_me else {"current": None},
         "water_seconds": WATER_SECONDS,
         "steal_rate": STEAL_RATE,
+        "steal_open": bool(user_row["steal_open"]),
         "stamina_max": STAMINA_MAX,
     }
     return result
+
+
+def farm_steal_random_state(conn, user_id, username):
+    """随机偷菜目标:steal_open=1 且非自己的玩家,优先有成熟作物的;返回状态或 None"""
+    rows = conn.execute(
+        """SELECT DISTINCT f.user_id AS uid FROM farm f
+           JOIN users u ON u.id=f.user_id
+           WHERE u.steal_open=1 AND f.user_id!=? AND f.crop IS NOT NULL AND f.stolen=0""",
+        (user_id,)).fetchall()
+    ready_ids, all_ids = [], []
+    for r in rows:
+        all_ids.append(r["uid"])
+        st = farm_state(conn, r["uid"], user_id, username)
+        if st and any(p.get("ready") for p in st["plots"]):
+            ready_ids.append(r["uid"])
+    pool = ready_ids or all_ids
+    if not pool:
+        return None
+    tid = random.choice(pool)
+    state = farm_state(conn, tid, user_id, username)
+    state["steal_daily_left"] = STEAL_DAILY_MAX - _rate_peek(f"steal:{username}", 86400)
+    return state
 
 
 # ---------------- 五子棋逻辑 ----------------
@@ -889,6 +963,29 @@ class Handler(BaseHTTPRequestHandler):
                     "SELECT username, points FROM users WHERE status='active' ORDER BY points DESC LIMIT 20").fetchall()
                 return self._send(200, {"list": [{"name": r["username"], "points": r["points"]} for r in rows]})
 
+        if path == "/api/wheel/stats":
+            user = self._me()
+            if not user:
+                return self._send(401, {"error": "未登录"})
+            with _lock, db() as conn:
+                total = conn.execute("SELECT COUNT(*) c FROM wheel_logs").fetchone()["c"]
+                my = conn.execute("SELECT COUNT(*) c FROM wheel_logs WHERE user_id=?",
+                                  (user["id"],)).fetchone()["c"]
+                win = conn.execute("SELECT COUNT(*) c FROM wheel_logs WHERE prize > 0 OR prize = -1").fetchone()["c"]
+                jackpots = [dict(r) for r in conn.execute(
+                    "SELECT username, name, prize, created_at FROM wheel_logs "
+                    "WHERE prize >= 50 ORDER BY id DESC LIMIT 30").fetchall()]
+                my_recent = [dict(r) for r in conn.execute(
+                    "SELECT name, prize, created_at FROM wheel_logs WHERE user_id=? "
+                    "ORDER BY id DESC LIMIT 8", (user["id"],)).fetchall()]
+            return self._send(200, {
+                "total": total,
+                "my_spins": my,
+                "win_rate": round(win / total * 100, 1) if total else 0,
+                "jackpots": jackpots,
+                "my_recent": my_recent,
+            })
+
         if path == "/api/mail":
             user = self._me()
             if not user:
@@ -916,6 +1013,16 @@ class Handler(BaseHTTPRequestHandler):
                     state["steal_daily_left"] = STEAL_DAILY_MAX - _rate_peek(f"steal:{user['username']}", 86400)
                     return self._send(200, state)
                 return self._send(200, farm_state(conn, user["id"]))
+
+        if path == "/api/farm/steal-random":
+            user = self._me()
+            if not user:
+                return self._send(401, {"error": "未登录"})
+            with _lock, db() as conn:
+                state = farm_steal_random_state(conn, user["id"], user["username"])
+            if state is None:
+                return self._send(404, {"error": "暂时没有可以偷的目标，稍后再来试试"})
+            return self._send(200, state)
 
         if path == "/api/bottle/feed":
             with _lock, db() as conn:
@@ -1204,6 +1311,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "今日积分已达上限"})
                 conn.execute("INSERT INTO checkins(user_id,day,reward,make_up,at) VALUES(?,?,?,0,?)",
                              (user["id"], today, reward, time.time()))
+                conn.execute("UPDATE users SET exp=exp+10 WHERE id=?", (user["id"],))   # 签到经验
                 points = change_points(conn, user["id"], user["username"], reward,
                                        "checkin", f"签到第 {streak + 1} 天", ip)
                 add_daily_earned(user["username"], reward, today_str)
@@ -1350,6 +1458,7 @@ class Handler(BaseHTTPRequestHandler):
                 if daily_earned(user["username"], today) + earned > DAILY_EARNED_CAP:
                     return self._send(400, {"error": f"今日可赚积分已达上限（{DAILY_EARNED_CAP}）"})
                 conn.execute("UPDATE game_sessions SET used=1 WHERE token=?", (token,))
+                conn.execute("UPDATE users SET exp=exp+? WHERE id=?", (max(1, earned // 20), user["id"]))  # 结算经验
                 points = change_points(conn, user["id"], user["username"], earned,
                                        "game_award", f"{GAMES[game]['name']} 得分 {score}", ip)
                 prev = conn.execute("SELECT score FROM scores WHERE game=? AND user_id=?",
@@ -1378,27 +1487,58 @@ class Handler(BaseHTTPRequestHandler):
             crop = str(data.get("crop", ""))
             if crop not in CROPS or not (0 <= slot < PLOT_COUNT):
                 return self._send(400, {"error": "参数不合法"})
-            cost = CROPS[crop]["cost"]
+            if CROPS[crop].get("vip") and not is_vip(user):
+                return self._send(400, {"error": "这是 VIP 专属作物，开通 VIP 后才能种植"})
             with _lock, db() as conn:
                 uid = user["id"]
+                seed = conn.execute("SELECT count FROM farm_seeds WHERE user_id=? AND crop=?",
+                                    (uid, crop)).fetchone()
+                if not seed or seed["count"] < 1:
+                    return self._send(400, {"error": "没有种子，先到种子商店购买"})
                 pr = conn.execute("SELECT * FROM farm_plots WHERE user_id=? AND slot=?",
                                   (uid, slot)).fetchone()
                 if not (pr and pr["unlocked"]) and slot >= DEFAULT_PLOTS:
                     return self._send(400, {"error": "该地块还未开垦"})
-                if user["points"] < cost:
-                    return self._send(400, {"error": "积分不足"})
                 cur = conn.execute("SELECT * FROM farm WHERE user_id=? AND slot=?", (uid, slot)).fetchone()
                 if cur and cur["crop"] is not None:
                     gh = building_level(conn, uid, "greenhouse")
                     lv = pr["level"] if pr else 1
                     if time.time() < cur["planted_at"] + farm_grow_seconds(cur["crop"], lv, gh):
                         return self._send(400, {"error": "该地块还没成熟"})
+                conn.execute("UPDATE farm_seeds SET count=count-1 WHERE user_id=? AND crop=?", (uid, crop))
                 conn.execute("INSERT OR REPLACE INTO farm(user_id,slot,crop,planted_at,waters,stolen,stolen_by) VALUES(?,?,?,?,0,0,NULL)",
                              (uid, slot, crop, time.time()))
-                points = change_points(conn, uid, user["username"], -cost, "farm_buy",
-                                       f"购买{CROPS[crop]['name']}种子", ip)
-            return self._send(200, {"ok": True, "points": points,
+                conn.execute("DELETE FROM farm_seeds WHERE user_id=? AND crop=? AND count<=0", (uid, crop))
+                conn.commit()
+            return self._send(200, {"ok": True,
                                     "farm": farm_state(conn, uid, uid, user["username"])})
+
+        # 购买种子(道具,不可出售)
+        if path == "/api/farm/buy-seed":
+            user = self._me()
+            if not user:
+                return self._send(401, {"error": "未登录"})
+            crop = str(data.get("crop", ""))
+            try:
+                count = max(1, min(99, int(data.get("count", 1))))
+            except Exception:
+                return self._send(400, {"error": "数量错误"})
+            if crop not in CROPS:
+                return self._send(400, {"error": "作物不存在"})
+            if CROPS[crop].get("vip") and not is_vip(user):
+                return self._send(400, {"error": "这是 VIP 专属作物，开通 VIP 后才能购买"})
+            cost = CROPS[crop]["cost"] * count
+            with _lock, db() as conn:
+                if user["points"] < cost:
+                    return self._send(400, {"error": f"积分不足，需要 {cost} 积分"})
+                points = change_points(conn, user["id"], user["username"], -cost,
+                                       "farm_buy_seed", f"购买{count}个{CROPS[crop]['name']}种子", ip)
+                conn.execute("INSERT INTO farm_seeds(user_id,crop,count) VALUES(?,?,?) "
+                             "ON CONFLICT(user_id,crop) DO UPDATE SET count=count+?",
+                             (user["id"], crop, count, count))
+                conn.commit()
+            return self._send(200, {"ok": True, "points": points,
+                                    "farm": farm_state(conn, user["id"], user["id"], user["username"])})
 
         if path == "/api/farm/water":
             user = self._me()
@@ -1459,6 +1599,7 @@ class Handler(BaseHTTPRequestHandler):
                              "ON CONFLICT(user_id,crop) DO UPDATE SET count=count+1",
                              (user["id"], row["crop"]))
                 conn.execute("DELETE FROM farm WHERE user_id=? AND slot=?", (user["id"], slot))
+                conn.execute("UPDATE users SET exp=exp+5 WHERE id=?", (user["id"],))   # 收获经验
                 conn.commit()
                 log(conn, user["id"], user["username"], "farm_harvest", f"收获{CROPS[row['crop']]['name']}入仓", ip=ip)
             return self._send(200, {"ok": True,
@@ -1507,6 +1648,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "槽位错误"})
             if not (0 <= slot < PLOT_COUNT) or slot < DEFAULT_PLOTS:
                 return self._send(400, {"error": "该地块无需开垦"})
+            if user_level(user) < PLOT_UNLOCK_LEVELS[slot]:
+                return self._send(400, {"error": f"需要达到 {PLOT_UNLOCK_LEVELS[slot]} 级才能开垦"})
             cost = PLOT_UNLOCK_COSTS[slot]
             with _lock, db() as conn:
                 pr = conn.execute("SELECT * FROM farm_plots WHERE user_id=? AND slot=?",
@@ -1559,7 +1702,7 @@ class Handler(BaseHTTPRequestHandler):
                 lv = building_level(conn, user["id"], name)
                 if lv >= BUILDING_MAX_LEVEL:
                     return self._send(400, {"error": "该建筑已满级"})
-                cost = (lv + 1) * BUILDINGS[name]["cost_base"]
+                cost = building_upgrade_cost(name, lv)
                 if user["points"] < cost:
                     return self._send(400, {"error": f"升级需要 {cost} 积分"})
                 conn.execute("INSERT INTO user_buildings(user_id,name,level) VALUES(?,?,?) "
@@ -1569,6 +1712,28 @@ class Handler(BaseHTTPRequestHandler):
                                        "building_upgrade", f"{BUILDINGS[name]['name']}升到{lv + 1}级", ip)
             return self._send(200, {"ok": True, "points": points,
                                     "farm": farm_state(conn, user["id"], user["id"], user["username"])})
+
+        if path == "/api/farm/steal-toggle":
+            user = self._me()
+            if not user:
+                return self._send(401, {"error": "未登录"})
+            open_flag = 1 if data.get("open") else 0
+            with _lock, db() as conn:
+                conn.execute("UPDATE users SET steal_open=? WHERE id=?", (open_flag, user["id"]))
+                conn.commit()
+                log(conn, user["id"], user["username"], "steal_toggle",
+                    "开启偷菜" if open_flag else "关闭偷菜", ip=ip)
+            return self._send(200, {"ok": True, "steal_open": bool(open_flag)})
+
+        if path == "/api/farm/steal-random":
+            user = self._me()
+            if not user:
+                return self._send(401, {"error": "未登录"})
+            with _lock, db() as conn:
+                state = farm_steal_random_state(conn, user["id"], user["username"])
+            if state is None:
+                return self._send(404, {"error": "暂时没有可以偷的目标，稍后再来试试"})
+            return self._send(200, state)
 
         if path == "/api/farm/steal":
             user = self._me()
@@ -1581,6 +1746,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "槽位错误"})
             today = time.strftime("%Y-%m-%d")
             with _lock, db() as conn:
+                own = conn.execute("SELECT steal_open FROM users WHERE id=?", (user["id"],)).fetchone()
+                if own and not own["steal_open"]:
+                    return self._send(400, {"error": "你已关闭偷菜，请先打开偷菜开关"})
                 if not rate_check(f"steal:{user['username']}", STEAL_DAILY_MAX, 86400):
                     return self._send(400, {"error": f"今日偷菜次数已达上限（{STEAL_DAILY_MAX} 次）"})
                 if not rate_check(f"stealh:{user['username']}", 6, 3600):
@@ -1590,6 +1758,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(404, {"error": "目标用户不存在"})
                 if target["id"] == user["id"]:
                     return self._send(400, {"error": "不能偷自己的菜"})
+                if not target["steal_open"]:
+                    return self._send(400, {"error": "对方已关闭偷菜"})
                 st = stamina_state(conn, user)
                 if st["current"] < STEAL_STAMINA_COST:
                     return self._send(400, {"error": f"体力不足，偷菜需要 {STEAL_STAMINA_COST} 点体力"})
@@ -1648,6 +1818,10 @@ class Handler(BaseHTTPRequestHandler):
                     points = change_points(conn, user["id"], user["username"], prize - WHEEL_COST,
                                            "wheel_spin", f"转盘：{sector['name']}", ip)
                     free = False
+                conn.execute("INSERT INTO wheel_logs(user_id, username, sector, name, prize, created_at) "
+                             "VALUES(?,?,?,?,?,?)",
+                             (user["id"], user["username"], idx, sector["name"], prize, time.time()))
+                conn.commit()
             return self._send(200, {"ok": True, "sector": idx, "name": sector["name"],
                                     "prize": prize, "free": free, "points": points})
 
