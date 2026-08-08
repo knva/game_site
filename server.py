@@ -175,6 +175,38 @@ def gen_goldminer_world(seed):
         items.append({**chosen, "x": x, "y": y})
     return items
 
+
+def judge_rhythm(chart, timeline):
+    """复刻前端判定+计分:Perfect<60ms(100分)/Good<160ms(60分),连击加成,按谱面重判。
+    chart: [{"t":秒,"lane":0..7}];timeline: [{"t":秒,"lane":0..7}](相对开局,不受时钟偏差影响)"""
+    keys_used = set()
+    perfect = good = miss = 0
+    combo = 0
+    score = 0
+    for n in sorted(chart, key=lambda x: x["t"]):
+        best = None
+        for i, k in enumerate(timeline):
+            if i in keys_used or k["lane"] != n["lane"]:
+                continue
+            dt = n["t"] - k["t"]
+            if abs(dt) <= 0.16:
+                if best is None or abs(dt) < abs(best[0]):
+                    best = (dt, i)
+        if best is None:
+            miss += 1
+            combo = 0
+            continue
+        keys_used.add(best[1])
+        if abs(best[0]) < 0.06:
+            perfect += 1
+            base = 100
+        else:
+            good += 1
+            base = 60
+        combo += 1
+        score += round(base * (1 + min(combo, 100) / 100))
+    return perfect, good, miss, score
+
 # 水果老虎机
 SLOT_COST = 5
 SLOT_PENDING_MAX = 5000     # 翻倍上限，防止无界放大
@@ -1550,9 +1582,23 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "分数异常，提交被拒绝"})
                 if game == "rhythm":
                     chart = json.loads(sess["chart"] or "[]")
-                    p, g, m = int(stats.get("perfect", 0)), int(stats.get("good", 0)), int(stats.get("miss", 0))
-                    if p + g + m < len(chart) - 1 or p + g + m > len(chart) + 1:
-                        return self._send(400, {"error": "判定数据异常，提交被拒绝"})
+                    # 服务器按谱面重判按键时间线(忽略客户端统计,防伪造满分)
+                    timeline = stats.get("timeline")
+                    if not isinstance(timeline, list) or len(timeline) > 2000:
+                        return self._send(400, {"error": "按键数据异常，提交被拒绝"})
+                    tl = []
+                    for x in timeline:
+                        try:
+                            t = float(x.get("t", -1))
+                            lane = int(x.get("lane", -1))
+                        except Exception:
+                            return self._send(400, {"error": "按键数据异常，提交被拒绝"})
+                        if 0 <= t <= 85 and 0 <= lane < 8:
+                            tl.append({"t": t, "lane": lane})
+                    p, g, m, server_score = judge_rhythm(chart, tl)
+                    if p + g + m != len(chart):
+                        pass  # 允许早退(未按键的音符记 miss 已在重判内)
+                    score = min(server_score, max_score)
                 earned = min(score, max_score)
                 if game == "goldminer":
                     # 服务器用 seed 重算地图,校验抓取轨迹(防伪造分数)
