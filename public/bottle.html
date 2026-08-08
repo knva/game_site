@@ -51,11 +51,17 @@ async function loadFeed() {
     document.getElementById("bottle-feed").innerHTML = list.length
       ? list.map(b => `
           <li class="bottle-item">
-            <div class="b-meta">🌊 ${escapeHtml(b.username)} · ${fmtTime(b.created_at)} · 👀 ${b.views}</div>
+            <div class="b-meta">🌊 ${escapeHtml(b.username)} · ${fmtTime(b.created_at)} · 👀 ${b.views}
+              <button class="mini-btn" style="float:right" onclick="reportBottle(${b.id}, ${b.contains_sensitive ? "true" : "false"})">举报</button>
+            </div>
             <div class="b-content">"${escapeHtml(b.content)}"</div>
           </li>`).join("")
       : `<li class="bottle-item">海边空荡荡，来扔第一个瓶子吧！</li>`;
   } catch (e) {}
+}
+
+function reportBottle(id, sensitive) {
+  reportContent("bottle", id, sensitive);
 }
 
 document.getElementById("btn-throw").onclick = async () => {

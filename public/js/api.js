@@ -97,6 +97,12 @@ const Api = {
   adminToggle: (user_id, reason) => Api.post("/api/admin/toggle-status", { user_id, reason }),
   adminMail: (to, title, content) => Api.post("/api/admin/mail", { to, title, content }),
   adminDelBottle: (id) => Api.post("/api/admin/del-bottle", { id }),
+
+  riskList: (status) => Api.get(`/api/admin/risk-list?status=${encodeURIComponent(status || "")}`),
+  riskReview: (id, note) => Api.post("/api/admin/risk-review", { id, note }),
+  report: (type, id, reason) => Api.post("/api/report", { type, id, reason }),
+  adminReportList: (status) => Api.get(`/api/admin/report-list?status=${encodeURIComponent(status || "")}`),
+  adminReportHandle: (id, action, note) => Api.post("/api/admin/report-handle", { id, action, note }),
 };
 
 /* ---------- 登录/注册:跳转独立页面 ---------- */
@@ -229,6 +235,20 @@ function requireLogin() {
     return false;
   }
   return true;
+}
+
+/* 举报内容(漂流瓶/站内信):重复举报时服务端会拒绝并提示 */
+async function reportContent(type, id, containsSensitive) {
+  if (!requireLogin()) return false;
+  const hint = containsSensitive ? "（内容疑似含敏感词，可选\"涉嫌违规内容\"）" : "";
+  const reason = prompt(`请填写举报原因${hint}：`, containsSensitive ? "涉嫌违规内容" : "");
+  if (reason === null) return false;
+  if (!reason.trim()) { toast("请填写举报原因", "err"); return false; }
+  try {
+    await Api.report(type, id, reason.trim());
+    toast("举报成功，管理员将尽快处理", "ok");
+    return true;
+  } catch (e) { toast(e.message, "err"); return false; }
 }
 
 function gameShell(title) {
