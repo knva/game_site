@@ -546,6 +546,19 @@ def init_db():
             handled_by TEXT,
             note TEXT,
             created_at REAL NOT NULL)""")
+        # Issue #24:管理员操作审计日志(高风险操作:封禁/解封、角色变更、调账、删除内容、审核处理、配置发布)
+        conn.execute("""CREATE TABLE IF NOT EXISTS admin_audit(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_id INTEGER NOT NULL,
+            admin_name TEXT NOT NULL,
+            target TEXT,
+            action TEXT NOT NULL,
+            before_value TEXT,
+            after_value TEXT,
+            reason TEXT,
+            request_id TEXT,
+            ip TEXT,
+            created_at REAL NOT NULL)""")
         # 老库迁移：漂流瓶 / 站内信隐藏标记(hide 后不出现在公开列表)
         _b_cols = [r["name"] for r in conn.execute("PRAGMA table_info(bottles)").fetchall()]
         if "hidden" not in _b_cols:
@@ -584,6 +597,16 @@ def log(conn, user_id, username, action, detail="", amount=None, ip=""):
     conn.execute("INSERT INTO logs(user_id,username,action,detail,amount,ip,at) VALUES(?,?,?,?,?,?,?)",
                  (user_id, username, action, detail, amount, ip, time.time()))
     conn.commit()
+
+
+def admin_audit(conn, admin_id, admin_name, action, target=None, before_value=None,
+                after_value=None, reason=None, request_id=None, ip=""):
+    """记录管理员操作审计(高风险确认机制的落点)。
+    调用方需在事务内插入;由后续 log()/conn.commit() 一并持久化。"""
+    conn.execute(
+        "INSERT INTO admin_audit(admin_id,admin_name,target,action,before_value,after_value,reason,request_id,ip,created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (admin_id, admin_name, target, action, before_value, after_value, reason, request_id, ip, time.time()))
 
 
 # ---------------- 后台辅助(#18/#19:仪表盘/用户详情脱敏) ----------------
@@ -1971,6 +1994,33 @@ class Handler(BaseHTTPRequestHandler):
                     out.append(d)
             return self._send(200, {"list": out})
 
+        if path == "/api/admin/audit-list":
+            user = self._me(admin=True)
+            if user is None or user is False:
+                return self._send(403, {"error": "无权限"})
+            admin_name = (q.get("admin") or [""])[0].strip()
+            target = (q.get("target") or [""])[0].strip()
+            action = (q.get("action") or [""])[0].strip()
+            cond, args = ["1=1"], []
+            if admin_name:
+                cond.append("admin_name=?")
+                args.append(admin_name)
+            if target:
+                cond.append("target=?")
+                args.append(target)
+            if action:
+                cond.append("action=?")
+                args.append(action)
+            with _lock, db() as conn:
+                total = conn.execute(
+                    f"SELECT COUNT(*) c FROM admin_audit WHERE {' AND '.join(cond)}", args).fetchone()["c"]
+                rows = conn.execute(
+                    f"""SELECT * FROM admin_audit WHERE {' AND '.join(cond)}
+                        ORDER BY id DESC LIMIT 100""", args).fetchall()
+                actions = [r["action"] for r in conn.execute(
+                    "SELECT DISTINCT action FROM admin_audit ORDER BY action").fetchall()]
+            return self._send(200, {"list": [dict(r) for r in rows], "total": total, "actions": actions})
+
         if path == "/api/admin/stats":
             user = self._me(admin=True)
             if user is None or user is False:
@@ -2156,6 +2206,7 @@ class Handler(BaseHTTPRequestHandler):
         if data is None:
             return
         ip = self._ip()
+        request_id = str(data.get("request_id", "")).strip() or secrets.token_hex(8)
 
         # ============ 注册 / 登录 ============
         if path == "/api/register":
@@ -3097,8 +3148,13 @@ class Handler(BaseHTTPRequestHandler):
                 target = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
                 if not target:
                     return self._send(400, {"error": "用户不存在"})
+                before = target["points"]
                 points = change_points(conn, uid, target["username"], amount,
                                        "admin_balance", f"管理员调整余额 {note}".strip(), ip)
+                admin_audit(conn, user["id"], user["username"], "balance_adjust",
+                            target=target["username"],
+                            before_value=str(before), after_value=str(points),
+                            reason=note or None, request_id=request_id, ip=ip)
                 log(conn, user["id"], user["username"], "admin_op", f"给 {target['username']} 调整余额", amount, ip)
             return self._send(200, {"ok": True, "points": points})
 
@@ -3110,7 +3166,9 @@ class Handler(BaseHTTPRequestHandler):
                 uid = int(data.get("user_id", 0))
             except Exception:
                 return self._send(400, {"error": "参数错误"})
-            reason = str(data.get("reason", "")).strip()[:100]
+            reason = str(data.get("reason", "")).strip()[:200]
+            if not reason:
+                return self._send(400, {"error": "封禁/解封必须填写理由"})
             with _lock, db() as conn:
                 target = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
                 if not target:
@@ -3118,12 +3176,16 @@ class Handler(BaseHTTPRequestHandler):
                 if target["role"] == "admin" and target["id"] != user["id"]:
                     return self._send(400, {"error": "不能操作其他管理员"})
                 new = "banned" if target["status"] == "active" else "active"
+                before = target["status"]
                 conn.execute("UPDATE users SET status=? WHERE id=?", (new, uid))
                 conn.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+                admin_audit(conn, user["id"], user["username"],
+                            "unban" if new == "active" else "ban",
+                            target=target["username"],
+                            before_value=before, after_value=new,
+                            reason=reason, request_id=request_id, ip=ip)
                 conn.commit()
-                detail = f"封禁/解封 {target['username']} → {new}"
-                if reason:
-                    detail += f"，理由：{reason}"
+                detail = f"封禁/解封 {target['username']} → {new}，理由：{reason}"
                 log(conn, user["id"], user["username"], "admin_op", detail, ip=ip)
             return self._send(200, {"ok": True, "status": new})
 
@@ -3144,6 +3206,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "用户不存在"})
                 cur = conn.execute("DELETE FROM sessions WHERE user_id=?", (target["id"],))
                 kicked = cur.rowcount
+                admin_audit(conn, user["id"], user["username"], "kick_session",
+                            target=target["username"], after_value=f"注销{kicked}个会话",
+                            reason=None, request_id=request_id, ip=ip)
                 conn.commit()
                 log(conn, user["id"], user["username"], "admin_op",
                     f"强制下线 {target['username']}(注销 {kicked} 个会话)", ip=ip)
@@ -3176,10 +3241,19 @@ class Handler(BaseHTTPRequestHandler):
                 bid = int(data.get("id", 0))
             except Exception:
                 return self._send(400, {"error": "参数错误"})
+            reason = str(data.get("reason", "")).strip()[:200]
+            if not reason:
+                return self._send(400, {"error": "删除漂流瓶必须填写理由"})
             with _lock, db() as conn:
+                row = conn.execute("SELECT content FROM bottles WHERE id=?", (bid,)).fetchone()
+                if row:
+                    admin_audit(conn, user["id"], user["username"], "del_bottle",
+                                target=f"bottle#{bid}",
+                                before_value=(row["content"] or "")[:200],
+                                reason=reason, request_id=request_id, ip=ip)
                 conn.execute("DELETE FROM bottles WHERE id=?", (bid,))
                 conn.commit()
-                log(conn, user["id"], user["username"], "admin_op", f"删除漂流瓶 #{bid}", ip=ip)
+                log(conn, user["id"], user["username"], "admin_op", f"删除漂流瓶 #{bid}，理由：{reason}", ip=ip)
             return self._send(200, {"ok": True})
 
         # ============ Issue #23:用户举报(漂流瓶 / 站内信) ============
@@ -3231,6 +3305,10 @@ class Handler(BaseHTTPRequestHandler):
                 conn.commit()
                 if cur.rowcount == 0:
                     return self._send(404, {"error": "风险事件不存在"})
+                admin_audit(conn, user["id"], user["username"], "risk_review",
+                            target=f"risk#{rid}", before_value="pending",
+                            after_value="reviewed", reason=note or None,
+                            request_id=request_id, ip=ip)
                 log(conn, user["id"], user["username"], "admin_op", f"风险事件 #{rid} 已复核", ip=ip)
             return self._send(200, {"ok": True})
 
@@ -3277,6 +3355,10 @@ class Handler(BaseHTTPRequestHandler):
                     status = "rejected"
                 conn.execute("UPDATE reports SET status=?, handled_by=?, note=? WHERE id=?",
                              (status, user["username"], note or None, rid))
+                admin_audit(conn, user["id"], user["username"], "report_handle",
+                            target=f"report#{rid}", before_value="pending",
+                            after_value=status, reason=note or None,
+                            request_id=request_id, ip=ip)
                 conn.commit()
                 log(conn, user["id"], user["username"], "admin_op",
                     f"处理举报 #{rid}（{action}）", ip=ip)
@@ -3306,6 +3388,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with _lock, db() as conn:
                     ver = config_publish(conn, name, user["username"])
+                    admin_audit(conn, user["id"], user["username"], "config_publish",
+                                target=name, after_value=f"v{ver}",
+                                request_id=request_id, ip=ip)
                     log(conn, user["id"], user["username"], "config_publish",
                         f"发布参数 {name}（v{ver}）", ip=ip)
             except ValueError as e:
@@ -3320,6 +3405,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with _lock, db() as conn:
                     res = config_rollback(conn, name, user["username"])
+                    admin_audit(conn, user["id"], user["username"], "config_rollback",
+                                target=name, after_value=f"{res['value']}(v{res['version']})",
+                                request_id=request_id, ip=ip)
                     log(conn, user["id"], user["username"], "config_rollback",
                         f"回滚参数 {name} → {res['value']}（v{res['version']}）", ip=ip)
             except ValueError as e:
@@ -3343,6 +3431,9 @@ def ensure_admins():
             u = get_user_by_name(conn, n)
             if u and u["role"] != "admin":
                 conn.execute("UPDATE users SET role='admin' WHERE id=?", (u["id"],))
+                admin_audit(conn, u["id"], n, "role_change", target=n,
+                            before_value=u["role"], after_value="admin",
+                            reason="预设管理员名单提升", request_id="startup")
                 conn.commit()
                 log(conn, u["id"], n, "admin_op", "预设管理员提升")
 
