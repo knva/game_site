@@ -53,7 +53,7 @@
     <div class="auth-tip">
       💎 注册即送 100 积分<br>
       ⛏️ 黄金矿工 · 🎹 8键音游 · ⚫ 五子棋 · 🎰 老虎机 · 🌱 农场 · 🎡 转盘<br>
-      首个注册用户自动成为管理员
+      管理员由部署方指定
     </div>
     <a class="back-home" href="/">← 返回首页</a>
   </div>
@@ -62,11 +62,34 @@
 <script src="/js/api.js"></script>
 <script>
 const q = new URLSearchParams(location.search);
-const redirect = (q.get("redirect") && !q.get("redirect").includes("login.html")) ? q.get("redirect") : "/";
+
+/* 站内安全重定向:只接受以单个 '/' 开头的站内相对路径 */
+function decAll(s) {
+  let r = String(s);
+  for (let i = 0; i < 3; i++) {
+    let d;
+    try { d = decodeURIComponent(r); } catch (e) { break; }
+    if (d === r) break;
+    r = d;
+  }
+  return r;
+}
+function safeRedirect(raw) {
+  if (!raw) return "/";
+  let r = decAll(raw);
+  if (r.includes("\\")) return "/";      // 反斜杠
+  if (!r.startsWith("/")) return "/";    // 非站内路径(https://、//、javascript: 等)
+  if (r.startsWith("//")) return "/";    // 协议相对 URL
+  if (r.includes("://")) return "/";     // 编码绕过如 /%68ttp%3A%2F%2F 解码后含 ://
+  if (/[\x00-\x1f]/.test(r)) return "/"; // 控制字符
+  return r;
+}
+
+const redirect = (q.get("redirect") && !q.get("redirect").includes("login.html")) ? safeRedirect(q.get("redirect")) : "/";
 let mode = q.get("mode") === "register" ? "register" : "login";
 
 /* 已登录则直接跳走 */
-if (Store.token && Store.user) {
+if (Store.user) {
   location.replace(redirect);
 }
 
@@ -104,7 +127,6 @@ async function doAuth() {
   submit.textContent = mode === "login" ? "登录中…" : "注册中…";
   try {
     const r = mode === "login" ? await Api.login(u, p) : await Api.register(u, p);
-    Store.token = r.token;
     Store.user = r.user;
     toast(r.msg || (mode === "login" ? "登录成功" : "注册成功"), "ok");
     location.href = redirect;

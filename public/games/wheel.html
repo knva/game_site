@@ -294,7 +294,7 @@ function fmtTime(ts) {
   return Math.floor(h / 24) + " 天前";
 }
 async function refreshStats() {
-  if (!Store.token) return;
+  if (!Store.user) return;
   try {
     const s = await Api.wheelStats();
     document.getElementById("stat-total").textContent = s.total;
@@ -316,7 +316,7 @@ document.getElementById("spin-btn").addEventListener("click", spin);
 (function init() {
   layout();
   applyRot();
-  if (Store.token) {
+  if (Store.user) {
     Api.me().then(({ user }) => { myPoints = user.points; hud(); }).catch(() => {});
   }
   hud();

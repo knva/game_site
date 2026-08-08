@@ -2,8 +2,6 @@
 /* 共享 API 工具与 UI */
 
 const Store = {
-  get token() { return localStorage.getItem("gs_token") || ""; },
-  set token(v) { v ? localStorage.setItem("gs_token", v) : localStorage.removeItem("gs_token"); },
   get user() {
     try { return JSON.parse(localStorage.getItem("gs_user") || "null"); } catch (e) { return null; }
   },
@@ -12,11 +10,9 @@ const Store = {
 
 async function api(url, opts = {}) {
   const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
-  if (Store.token) headers["X-Token"] = Store.token;
   const res = await fetch(url, { ...opts, headers });
   const json = await res.json().catch(() => ({}));
   if (res.status === 401) {
-    Store.token = "";
     Store.user = null;
     if (window.onAuthExpired) window.onAuthExpired();
   }
@@ -103,7 +99,6 @@ function authModal() {
 
 async function logout() {
   try { await Api.logout(); } catch (e) {}
-  Store.token = "";
   Store.user = null;
   toast("已退出登录");
   if (window.onAuthChange) window.onAuthChange();
@@ -145,7 +140,7 @@ async function initTopBar() {
 }
 
 async function refreshPoints() {
-  if (!Store.token) return;
+  if (!Store.user) return;
   try {
     const { user, unread } = await Api.me();
     Store.user = { ...Store.user, ...user };
@@ -220,7 +215,7 @@ function fmtTime(t) {
 }
 
 function requireLogin() {
-  if (!Store.token) {
+  if (!Store.user) {
     toast("请先登录", "err");
     authModal();
     return false;

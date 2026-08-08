@@ -27,10 +27,13 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "game.db")
 PORT = int(os.environ.get("PORT", "8000"))
 ADMIN_USERS = [u.strip() for u in os.environ.get("ADMIN_USERS", "").split(",") if u.strip()]
+# 部署时通过环境变量指定初始管理员(逗号分隔用户名),注册时/启动时提升为 admin
+ADMIN_INIT = [u.strip() for u in os.environ.get("ADMIN_INIT", "").split(",") if u.strip()]
 
 WELCOME_POINTS = 100
 LOGIN_SESSION_DAYS = 7
 GAME_SESSION_MINUTES = 30
+SESSION_COOKIE = "gs_session"  # HttpOnly 会话 Cookie(同源请求自动携带)
 
 # 游戏防作弊参数
 GAMES = {
@@ -1029,9 +1032,28 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        cookie = getattr(self, "_session_cookie", None)
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _cookie_token(self):
+        """从 Cookie 中解析会话 token(仅取 gs_session,不信任其它值)"""
+        raw = self.headers.get("Cookie") or ""
+        for part in raw.split(";"):
+            part = part.strip()
+            if part.startswith(SESSION_COOKIE + "="):
+                return part[len(SESSION_COOKIE) + 1:]
+        return ""
+
+    def _set_session_cookie(self, token):
+        self._session_cookie = (f"{SESSION_COOKIE}={token}; HttpOnly; Path=/; SameSite=Lax; "
+                                f"Max-Age={LOGIN_SESSION_DAYS * 86400}")
+
+    def _clear_session_cookie(self):
+        self._session_cookie = f"{SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0"
 
     def _read_json(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -1051,6 +1073,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _me(self, admin=False):
         token = (self.headers.get("X-Token") or "").strip()
+        if not token:
+            token = self._cookie_token()
         with _lock, db() as conn:
             user = auth_user(conn, token)
             if not user:
@@ -1264,11 +1288,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/gomoku/stream":
             code = (q.get("code") or [""])[0].strip().upper()
-            token = (q.get("token") or [""])[0].strip()
+            user = self._me()
+            if not user:
+                return self._send(401, {"error": "未登录"})
             with _lock, db() as conn:
-                user = auth_user(conn, token)
-                if not user:
-                    return self._send(401, {"error": "未登录"})
                 row = conn.execute("SELECT * FROM gomoku_rooms WHERE code=?", (code,)).fetchone()
                 if not row:
                     return self._send(404, {"error": "房间不存在"})
@@ -1399,12 +1422,13 @@ class Handler(BaseHTTPRequestHandler):
             with _lock, db() as conn:
                 if get_user_by_name(conn, username):
                     return self._send(400, {"error": "该昵称已被注册"})
-                admin_count = conn.execute("SELECT COUNT(*) c FROM users WHERE role='admin'").fetchone()["c"]
-                role = "admin" if (admin_count == 0 or username in ADMIN_USERS) else "user"
+                # 注册永远创建普通用户;仅当用户名命中预设管理员名单(ADMIN_USERS / ADMIN_INIT)时设为 admin
+                role = "admin" if username in ADMIN_USERS or username in ADMIN_INIT else "user"
                 cur = conn.execute("INSERT INTO users(username,password,salt,points,role,created_at) VALUES(?,?,?,?,?,?)",
                                    (username, hash_pw(password, salt), salt, WELCOME_POINTS, role, time.time()))
                 uid = cur.lastrowid
                 token = new_session(conn, uid, ip)
+                self._set_session_cookie(token)
                 log(conn, uid, username, "register", "新用户注册", ip=ip)
             return self._send(200, {"ok": True, "token": token, "user": {
                 "id": uid, "username": username, "points": WELCOME_POINTS, "role": role},
@@ -1422,6 +1446,7 @@ class Handler(BaseHTTPRequestHandler):
                 if row["status"] != "active":
                     return self._send(403, {"error": "账号已被封禁"})
                 token = new_session(conn, row["id"], ip)
+                self._set_session_cookie(token)
                 conn.execute("UPDATE users SET last_login=? WHERE id=?", (time.time(), row["id"]))
                 conn.commit()
                 log(conn, row["id"], username, "login", "登录成功", ip=ip)
@@ -1430,6 +1455,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/logout":
             token = (self.headers.get("X-Token") or "").strip()
+            if not token:
+                token = self._cookie_token()
             with _lock, db() as conn:
                 row = conn.execute("SELECT * FROM sessions WHERE token=?", (token,)).fetchone()
                 if row:
@@ -1437,6 +1464,7 @@ class Handler(BaseHTTPRequestHandler):
                     conn.commit()
                     u = conn.execute("SELECT * FROM users WHERE id=?", (row["user_id"],)).fetchone()
                     log(conn, row["user_id"], u["username"] if u else "?", "logout", "退出登录", ip=ip)
+            self._clear_session_cookie()
             return self._send(200, {"ok": True})
 
         # ============ 签到 / VIP ============
@@ -2318,13 +2346,28 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+def ensure_admins():
+    """启动时将 ADMIN_USERS / ADMIN_INIT 中的存量用户提升为 admin(幂等)"""
+    names = [n for n in ADMIN_USERS + ADMIN_INIT if n]
+    if not names:
+        return
+    with _lock, db() as conn:
+        for n in names:
+            u = get_user_by_name(conn, n)
+            if u and u["role"] != "admin":
+                conn.execute("UPDATE users SET role='admin' WHERE id=?", (u["id"],))
+                conn.commit()
+                log(conn, u["id"], n, "admin_op", "预设管理员提升")
+
+
 def main():
     init_db()
+    ensure_admins()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"🎮 小游戏乐园已启动: http://localhost:{PORT}")
-    print(f"   数据: {DB_PATH}   首个注册用户自动成为管理员")
-    if ADMIN_USERS:
-        print(f"   预设管理员: {', '.join(ADMIN_USERS)}")
+    print(f"   数据: {DB_PATH}   注册用户均为普通用户,不自动成为管理员")
+    if ADMIN_USERS + ADMIN_INIT:
+        print(f"   预设管理员: {', '.join(ADMIN_USERS + ADMIN_INIT)}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
