@@ -506,6 +506,15 @@ def init_db():
             key TEXT PRIMARY KEY,
             count INTEGER NOT NULL,
             window_start REAL NOT NULL)""")
+        # Issue #21:游戏参数配置(draft/published 版本链,发布/回滚保留历史)
+        conn.execute("""CREATE TABLE IF NOT EXISTS game_configs(
+            name TEXT NOT NULL,
+            value TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'draft',
+            updated_by TEXT,
+            created_at REAL NOT NULL,
+            PRIMARY KEY(name, version))""")
         conn.commit()
 
 
@@ -657,6 +666,252 @@ def change_points(conn, user_id, username, amount, action, detail="", ip="", ide
             (user_id, username, action, amount, balance, idem_key, None, detail, ip, time.time()))
         log(conn, user_id, username, action, detail, amount, ip)
         return balance
+
+
+# ---------------- Issue #21:游戏参数配置(draft/published + 内存缓存) ----------------
+# 可配置的关键参数(读取侧失败时回退这些硬编码默认值)
+CONFIG_DEFAULTS = {
+    "goldminer_ticket": GOLDMINER_TICKET,
+    "goldminer_pay_min": GOLDMINER_PAY_MIN,
+    "goldminer_pay_max": GOLDMINER_PAY_MAX,
+    "slot_cost": SLOT_COST,
+    "wheel_cost": WHEEL_COST,
+    "daily_earned_cap": DAILY_EARNED_CAP,
+}
+CONFIG_DESCS = {
+    "goldminer_ticket": "黄金矿工门票",
+    "goldminer_pay_min": "黄金矿工单局保底奖励",
+    "goldminer_pay_max": "黄金矿工单局最高奖励",
+    "slot_cost": "老虎机单次费用",
+    "wheel_cost": "转盘单次费用",
+    "daily_earned_cap": "每日可赚积分上限",
+}
+
+_config_cache = {}
+_config_cache_lock = threading.Lock()
+
+
+def _parse_config_value(raw):
+    s = str(raw).strip()
+    if re.fullmatch(r"-?\d+", s):
+        return int(s)
+    try:
+        return float(s)
+    except ValueError:
+        return s
+
+
+def config_invalidate(name=None):
+    """发布/回滚后使缓存失效(游戏逻辑立即读到新值)"""
+    with _config_cache_lock:
+        if name is None:
+            _config_cache.clear()
+        else:
+            _config_cache.pop(name, None)
+
+
+def config_get(name, default=None):
+    """读取已发布参数(带内存缓存);无记录或异常时回退硬编码默认值。"""
+    with _config_cache_lock:
+        if name in _config_cache:
+            return _config_cache[name]
+    val = default
+    try:
+        with _lock, db() as conn:
+            row = conn.execute(
+                "SELECT value FROM game_configs WHERE name=? AND status='published' "
+                "ORDER BY version DESC LIMIT 1", (name,)).fetchone()
+        if row:
+            val = _parse_config_value(row["value"])
+    except Exception:
+        val = default
+    with _config_cache_lock:
+        _config_cache[name] = val
+    return val
+
+
+def config_set(conn, name, value, operator):
+    """写入 draft 版本(同名草稿覆盖;版本号 = 全表最大 + 1)。"""
+    if name not in CONFIG_DEFAULTS:
+        raise ValueError("未知参数")
+    raw = str(value).strip()
+    try:
+        num = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError("参数值必须是数字")
+    if num <= 0 or num != int(num):
+        raise ValueError("参数值必须为正整数")
+    num = int(num)
+    if name == "goldminer_pay_min":
+        mx = config_get("goldminer_pay_max", GOLDMINER_PAY_MAX)
+        if mx is not None and num > mx:
+            raise ValueError("保底奖励不能大于最高奖励")
+    if name == "goldminer_pay_max":
+        mn = config_get("goldminer_pay_min", GOLDMINER_PAY_MIN)
+        if mn is not None and num < mn:
+            raise ValueError("最高奖励不能小于保底奖励")
+    value_str = str(num)
+    draft = conn.execute(
+        "SELECT version FROM game_configs WHERE name=? AND status='draft' ORDER BY version DESC LIMIT 1",
+        (name,)).fetchone()
+    now = time.time()
+    if draft:
+        conn.execute("UPDATE game_configs SET value=?, updated_by=?, created_at=? "
+                     "WHERE name=? AND version=? AND status='draft'",
+                     (value_str, operator, now, name, draft["version"]))
+        conn.commit()
+        return draft["version"]
+    ver = conn.execute("SELECT COALESCE(MAX(version),0) v FROM game_configs WHERE name=?",
+                       (name,)).fetchone()["v"] + 1
+    conn.execute("INSERT INTO game_configs(name,value,version,status,updated_by,created_at) "
+                 "VALUES(?,?,?,?,?,?)",
+                 (name, value_str, ver, "draft", operator, now))
+    conn.commit()
+    return ver
+
+
+def config_publish(conn, name, operator):
+    """发布 draft → published(缓存失效,新开局即按新值扣费/发奖)。"""
+    if name not in CONFIG_DEFAULTS:
+        raise ValueError("未知参数")
+    draft = conn.execute(
+        "SELECT * FROM game_configs WHERE name=? AND status='draft' ORDER BY version DESC LIMIT 1",
+        (name,)).fetchone()
+    if not draft:
+        raise ValueError("没有待发布的草稿")
+    conn.execute("UPDATE game_configs SET status='published', updated_by=? WHERE name=? AND version=?",
+                 (operator, name, draft["version"]))
+    conn.commit()
+    config_invalidate(name)
+    return draft["version"]
+
+
+def config_rollback(conn, name, operator):
+    """回滚:发布上一个 published 版本的值(首次发布前回退硬编码默认值)。"""
+    if name not in CONFIG_DEFAULTS:
+        raise ValueError("未知参数")
+    active = conn.execute(
+        "SELECT * FROM game_configs WHERE name=? AND status='published' ORDER BY version DESC LIMIT 1",
+        (name,)).fetchone()
+    prev_value = None
+    if active:
+        prev = conn.execute(
+            "SELECT value FROM game_configs WHERE name=? AND status='published' AND version<? "
+            "ORDER BY version DESC LIMIT 1", (name, active["version"])).fetchone()
+        if prev:
+            prev_value = prev["value"]
+    if prev_value is None:
+        prev_value = str(CONFIG_DEFAULTS[name])
+    ver = conn.execute("SELECT COALESCE(MAX(version),0) v FROM game_configs WHERE name=?",
+                       (name,)).fetchone()["v"] + 1
+    conn.execute("INSERT INTO game_configs(name,value,version,status,updated_by,created_at) "
+                 "VALUES(?,?,?,?,?,?)",
+                 (name, prev_value, ver, "published", operator, time.time()))
+    conn.commit()
+    config_invalidate(name)
+    return {"version": ver, "value": prev_value}
+
+
+def _admin_config_list(conn):
+    """参数配置列表:每个参数给出默认值 / 当前已发布值 / 待发布草稿。"""
+    items = []
+    for name in CONFIG_DEFAULTS:
+        rows = conn.execute(
+            "SELECT * FROM game_configs WHERE name=? ORDER BY version ASC", (name,)).fetchall()
+        active = None
+        active_version = None
+        draft = None
+        for r in rows:
+            if r["status"] == "published":
+                active = _parse_config_value(r["value"])
+                active_version = r["version"]
+            elif r["status"] == "draft":
+                draft = {"value": _parse_config_value(r["value"]), "version": r["version"],
+                         "updated_by": r["updated_by"], "updated_at": r["created_at"]}
+        items.append({
+            "name": name,
+            "desc": CONFIG_DESCS.get(name, name),
+            "default": CONFIG_DEFAULTS[name],
+            "value": active if active is not None else CONFIG_DEFAULTS[name],
+            "published_version": active_version,
+            "draft": draft,
+        })
+    return {"list": items, "defaults": dict(CONFIG_DEFAULTS)}
+
+
+# ---------------- Issue #20:积分经济中心 / 通胀告警(数据与 point_ledger 流水总和一致) ----------------
+def _admin_economy(conn):
+    day_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+
+    def _sum_col(case):
+        return conn.execute(
+            f"SELECT COALESCE(SUM({case}),0) s FROM point_ledger WHERE created_at>=?",
+            (day_start,)).fetchone()["s"]
+
+    # by_business:按业务聚合(全量累计,金额入/出)
+    by_business = {}
+    for r in conn.execute(
+            "SELECT business, "
+            "SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) AS amount_in, "
+            "SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END) AS amount_out "
+            "FROM point_ledger GROUP BY business").fetchall():
+        by_business[r["business"]] = {"amount_in": r["amount_in"], "amount_out": r["amount_out"]}
+
+    # daily_net:最近 14 天(含今天)
+    daily_net = []
+    for i in range(13, -1, -1):
+        d = (date.today() - timedelta(days=i)).isoformat()
+        s = time.mktime(time.strptime(d, "%Y-%m-%d"))
+        row = conn.execute(
+            "SELECT SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) AS produced, "
+            "SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END) AS consumed "
+            "FROM point_ledger WHERE created_at>=? AND created_at<?", (s, s + 86400)).fetchone()
+        produced = row["produced"] or 0
+        consumed = row["consumed"] or 0
+        daily_net.append({"date": d, "produced": produced, "consumed": consumed, "net": produced - consumed})
+
+    # distribution:余额分布(0-100/100-1000/1000-10000/1万+)
+    tiers = [("0~100", 0, 100), ("100~1000", 100, 1000), ("1000~10000", 1000, 10000), ("10000+", 10000, None)]
+    distribution = []
+    for label, lo, hi in tiers:
+        if hi is None:
+            c = conn.execute("SELECT COUNT(*) c FROM users WHERE points>=?", (lo,)).fetchone()["c"]
+        else:
+            c = conn.execute("SELECT COUNT(*) c FROM users WHERE points>=? AND points<?",
+                             (lo, hi)).fetchone()["c"]
+        distribution.append({"range": label, "users": c})
+
+    # alerts:异常增长 / 来源突增 / 总量阈值
+    alerts = []
+    for r in conn.execute(
+            "SELECT username, SUM(amount) net FROM point_ledger WHERE created_at>=? "
+            "GROUP BY user_id, username HAVING SUM(amount)>5000 ORDER BY net DESC",
+            (day_start,)).fetchall():
+        alerts.append({"type": "user_surge", "level": "high",
+                       "msg": f"用户「{r['username']}」今日净增 {r['net']} 积分（阈值 5000）"})
+    biz_today = conn.execute(
+        "SELECT business, SUM(amount) produced FROM point_ledger WHERE created_at>=? AND amount>0 "
+        "GROUP BY business", (day_start,)).fetchall()
+    if biz_today:
+        avg = sum(r["produced"] for r in biz_today) / len(biz_today)
+        for r in biz_today:
+            if avg > 0 and r["produced"] > avg * 5:
+                alerts.append({"type": "business_surge", "level": "medium",
+                               "msg": f"业务「{r['business']}」今日产出 {r['produced']}，超过全站均值 {avg:.0f} 的 5 倍"})
+    today_produced = _sum_col("CASE WHEN amount>0 THEN amount ELSE 0 END")
+    today_consumed = _sum_col("CASE WHEN amount<0 THEN -amount ELSE 0 END")
+    today_net = today_produced - today_consumed
+    if today_net > 50000:
+        alerts.append({"type": "total_net", "level": "warning",
+                       "msg": f"全站今日净增 {today_net} 积分（阈值 50000）"})
+
+    return {
+        "by_business": by_business,
+        "daily_net": daily_net,
+        "distribution": distribution,
+        "alerts": alerts,
+        "summary": {"produced": today_produced, "consumed": today_consumed, "net": today_net},
+    }
 
 
 def get_user_by_name(conn, name):
@@ -1194,7 +1449,8 @@ def slot_spin(conn, uid, username, ip):
         pay = SLOT_SYMBOLS[mid]["x3"]
     elif reel[0] == mid or reel[2] == mid:
         pay = SLOT_PAIR_PAY
-    change_points(conn, uid, username, -SLOT_COST, "slot_spin", f"拉杆 {'中奖'+str(pay) if pay else '未中奖'}", ip)
+    change_points(conn, uid, username, -config_get("slot_cost", SLOT_COST),
+                  "slot_spin", f"拉杆 {'中奖'+str(pay) if pay else '未中奖'}", ip)
     token = None
     if pay > 0:
         token = secrets.token_hex(16)
@@ -1343,7 +1599,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "vip_until": user["vip_until"], "vip": is_vip(user),
                                     "vip_days_left": vip_remaining_days(user)},
                                     "unread": unread, "today_earned": earned,
-                                    "daily_cap": DAILY_EARNED_CAP})
+                                    "daily_cap": config_get("daily_earned_cap", DAILY_EARNED_CAP)})
 
         if path == "/api/leaderboard":
             kind = (q.get("type") or ["points"])[0]
@@ -1602,6 +1858,22 @@ class Handler(BaseHTTPRequestHandler):
                     (time.time() - 86400,)).fetchone()["s"]
             return self._send(200, s)
 
+        if path == "/api/admin/economy":
+            user = self._me(admin=True)
+            if user is None or user is False:
+                return self._send(403, {"error": "无权限"})
+            with _lock, db() as conn:
+                data = _admin_economy(conn)
+            return self._send(200, data)
+
+        if path == "/api/admin/config/list":
+            user = self._me(admin=True)
+            if user is None or user is False:
+                return self._send(403, {"error": "无权限"})
+            with _lock, db() as conn:
+                data = _admin_config_list(conn)
+            return self._send(200, data)
+
         if path == "/api/gomoku/rank":
             with _lock, db() as conn:
                 rows = conn.execute(
@@ -1827,7 +2099,7 @@ class Handler(BaseHTTPRequestHandler):
                 streak = compute_streak(conn, user["id"])
                 reward = checkin_reward(streak + 1, is_vip(user))
                 today_str = time.strftime("%Y-%m-%d")
-                if daily_earned(user["username"], today_str) + reward > DAILY_EARNED_CAP:
+                if daily_earned(user["username"], today_str) + reward > config_get("daily_earned_cap", DAILY_EARNED_CAP):
                     return self._send(400, {"error": "今日积分已达上限"})
                 conn.execute("INSERT INTO checkins(user_id,day,reward,make_up,at) VALUES(?,?,?,0,?)",
                              (user["id"], today, reward, time.time()))
@@ -1905,10 +2177,11 @@ class Handler(BaseHTTPRequestHandler):
                         (user["id"], day_start)).fetchone()["c"]
                 if played >= GOLDMINER_DAILY_LIMIT:
                     return self._send(429, {"error": f"黄金矿工每天限玩 {GOLDMINER_DAILY_LIMIT} 次，明天再来！"})
-                if user["points"] < GOLDMINER_TICKET:
-                    return self._send(400, {"error": f"门票需要 {GOLDMINER_TICKET} 积分"})
+                ticket = config_get("goldminer_ticket", GOLDMINER_TICKET)
+                if user["points"] < ticket:
+                    return self._send(400, {"error": f"门票需要 {ticket} 积分"})
                 with _lock, db() as conn:
-                    change_points(conn, user["id"], user["username"], -GOLDMINER_TICKET,
+                    change_points(conn, user["id"], user["username"], -ticket,
                                   "goldminer_ticket", f"购买门票（第{played + 1}/{GOLDMINER_DAILY_LIMIT}次）", ip)
             seed = secrets.randbits(31)
             max_score = GAMES[game]["max_score"]
@@ -1931,10 +2204,10 @@ class Handler(BaseHTTPRequestHandler):
                                     "chart": chart, "max_score": max_score,
                                     "goldminer_seed": seed if game == "goldminer" else None,
                                     "duration": GAMES[game]["duration"],
-                                    "ticket": GOLDMINER_TICKET if game == "goldminer" else 0,
+                                    "ticket": ticket if game == "goldminer" else 0,
                                     "daily_left": played if game == "goldminer" else None,
                                     "limits": {"hour": SUBMIT_PER_HOUR, "day": SUBMIT_PER_DAY,
-                                               "daily_cap": DAILY_EARNED_CAP}})
+                                               "daily_cap": config_get("daily_earned_cap", DAILY_EARNED_CAP)}})
 
         if path == "/api/game/end":
             user = self._me()
@@ -2009,9 +2282,11 @@ class Handler(BaseHTTPRequestHandler):
                         total_v += v
                     if score != total_v:
                         return self._send(400, {"error": "分数与抓取记录不符"})
-                    earned = random.randint(GOLDMINER_PAY_MIN, GOLDMINER_PAY_MAX)
-                if daily_earned(user["username"], today) + earned > DAILY_EARNED_CAP:
-                    return self._send(400, {"error": f"今日可赚积分已达上限（{DAILY_EARNED_CAP}）"})
+                    earned = random.randint(config_get("goldminer_pay_min", GOLDMINER_PAY_MIN),
+                                            config_get("goldminer_pay_max", GOLDMINER_PAY_MAX))
+                daily_cap = config_get("daily_earned_cap", DAILY_EARNED_CAP)
+                if daily_earned(user["username"], today) + earned > daily_cap:
+                    return self._send(400, {"error": f"今日可赚积分已达上限（{daily_cap}）"})
                 conn.execute("UPDATE game_sessions SET used=1 WHERE token=?", (token,))
                 conn.execute("UPDATE users SET exp=exp+? WHERE id=?", (max(1, earned // 20), user["id"]))  # 结算经验
                 points = change_points(conn, user["id"], user["username"], earned,
@@ -2028,8 +2303,10 @@ class Handler(BaseHTTPRequestHandler):
                 log(conn, user["id"], user["username"], "game_end", f"结算 {GAMES[game]['name']}", earned, ip)
             return self._send(200, {"ok": True, "earned": earned, "points": points,
                                     "is_best": is_best, "today_earned": daily_earned(user["username"], today),
-                                    "ticket": GOLDMINER_TICKET if game == "goldminer" else 0,
-                                    "pay_range": [GOLDMINER_PAY_MIN, GOLDMINER_PAY_MAX] if game == "goldminer" else None})
+                                    "ticket": config_get("goldminer_ticket", GOLDMINER_TICKET) if game == "goldminer" else 0,
+                                    "pay_range": [config_get("goldminer_pay_min", GOLDMINER_PAY_MIN),
+                                                  config_get("goldminer_pay_max", GOLDMINER_PAY_MAX)]
+                                    if game == "goldminer" else None})
 
         # ============ 农场（开地/升级/建筑/种植/浇水/收获/出售/偷菜） ============
         if path == "/api/farm/plant":
@@ -2177,11 +2454,12 @@ class Handler(BaseHTTPRequestHandler):
                 sh = building_level(conn, user["id"], "storehouse")
                 unit = farm_sell_value(crop, sh)
                 earned = inv["count"] * unit
-                remain = DAILY_EARNED_CAP - daily_earned(user["username"], today)
+                daily_cap = config_get("daily_earned_cap", DAILY_EARNED_CAP)
+                remain = daily_cap - daily_earned(user["username"], today)
                 if earned > remain:
                     sell_count = remain // unit
                     if sell_count <= 0:
-                        return self._send(400, {"error": f"今日可赚积分已达上限（{DAILY_EARNED_CAP}）"})
+                        return self._send(400, {"error": f"今日可赚积分已达上限（{daily_cap}）"})
                     conn.execute("UPDATE inventory SET count=count-? WHERE user_id=? AND crop=?",
                                  (sell_count, user["id"], crop))
                     earned = sell_count * unit
@@ -2333,7 +2611,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "对方作物还没成熟"})
                 sh = building_level(conn, target["id"], "storehouse")
                 reward = max(1, round(farm_sell_value(row["crop"], sh) * STEAL_RATE))
-                remain = DAILY_EARNED_CAP - daily_earned(user["username"], today)
+                remain = config_get("daily_earned_cap", DAILY_EARNED_CAP) - daily_earned(user["username"], today)
                 if reward > remain:
                     return self._send(400, {"error": "今日积分已达上限，明天再来偷吧"})
                 conn.execute("UPDATE farm SET stolen=1, stolen_by=? WHERE user_id=? AND slot=?",
@@ -2380,7 +2658,8 @@ class Handler(BaseHTTPRequestHandler):
                         "UPDATE wheel_free_tickets SET used=1 WHERE ticket_id=? AND used=0",
                         (ticket["ticket_id"],))
                     used_free = cur.rowcount > 0
-                if not used_free and user["points"] < WHEEL_COST:
+                wheel_cost = config_get("wheel_cost", WHEEL_COST)
+                if not used_free and user["points"] < wheel_cost:
                     return self._send(400, {"error": "积分不足"})
                 idx = random.choices(range(len(WHEEL_SECTORS)), weights=WHEEL_WEIGHTS, k=1)[0]
                 sector = WHEEL_SECTORS[idx]
@@ -2390,10 +2669,10 @@ class Handler(BaseHTTPRequestHandler):
                     points = conn.execute("SELECT points FROM users WHERE id=?",
                                           (user["id"],)).fetchone()["points"]
                 elif free:
-                    points = change_points(conn, user["id"], user["username"], -WHEEL_COST,
+                    points = change_points(conn, user["id"], user["username"], -wheel_cost,
                                            "wheel_spin", "转盘：再转一次", ip)
                 else:
-                    points = change_points(conn, user["id"], user["username"], prize - WHEEL_COST,
+                    points = change_points(conn, user["id"], user["username"], prize - wheel_cost,
                                            "wheel_spin", f"转盘：{sector['name']}", ip)
                 if free:
                     # 抽中“再转一次”发放一次性免费券(24 小时有效)
@@ -2482,13 +2761,14 @@ class Handler(BaseHTTPRequestHandler):
                 today = time.strftime("%Y-%m-%d")
                 if slot_daily_earned(user["username"], today) >= SLOT_DAILY_MAX:
                     return self._send(400, {"error": f"今日老虎机收益已达上限（{SLOT_DAILY_MAX} 金币），明天再来！"})
-                if user["points"] < SLOT_COST:
-                    return self._send(400, {"error": f"积分不足，每次需要 {SLOT_COST} 积分"})
+                slot_cost = config_get("slot_cost", SLOT_COST)
+                if user["points"] < slot_cost:
+                    return self._send(400, {"error": f"积分不足，每次需要 {slot_cost} 积分"})
                 reel, pay, token = slot_spin(conn, user["id"], user["username"], ip)
                 points = conn.execute("SELECT points FROM users WHERE id=?", (user["id"],)).fetchone()["points"]
-            return self._send(200, {"ok": True, "reel": reel, "pay": pay, "cost": SLOT_COST,
+            return self._send(200, {"ok": True, "reel": reel, "pay": pay, "cost": slot_cost,
                                     "points": points, "double_token": token,
-                                    "can_double": bool(token and pay > SLOT_COST),
+                                    "can_double": bool(token and pay > slot_cost),
                                     "daily_left": SLOT_DAILY_MAX - slot_daily_earned(user["username"], today),
                                     "payouts": {s: SLOT_SYMBOLS[s]["x3"] for s in SLOT_SYMBOLS}})
 
@@ -2762,6 +3042,50 @@ class Handler(BaseHTTPRequestHandler):
                 conn.commit()
                 log(conn, user["id"], user["username"], "admin_op", f"删除漂流瓶 #{bid}", ip=ip)
             return self._send(200, {"ok": True})
+
+        # ============ Issue #21:游戏参数配置(draft/publish/rollback) ============
+        if path == "/api/admin/config/set":
+            user = self._me(admin=True)
+            if user is None or user is False:
+                return self._send(403, {"error": "无权限"})
+            name = str(data.get("name", "")).strip()
+            value = data.get("value")
+            try:
+                with _lock, db() as conn:
+                    ver = config_set(conn, name, value, user["username"])
+                    log(conn, user["id"], user["username"], "config_set",
+                        f"修改参数 {name} → {value}（草稿 v{ver}）", ip=ip)
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
+            return self._send(200, {"ok": True, "name": name, "version": ver})
+
+        if path == "/api/admin/config/publish":
+            user = self._me(admin=True)
+            if user is None or user is False:
+                return self._send(403, {"error": "无权限"})
+            name = str(data.get("name", "")).strip()
+            try:
+                with _lock, db() as conn:
+                    ver = config_publish(conn, name, user["username"])
+                    log(conn, user["id"], user["username"], "config_publish",
+                        f"发布参数 {name}（v{ver}）", ip=ip)
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
+            return self._send(200, {"ok": True, "name": name, "version": ver})
+
+        if path == "/api/admin/config/rollback":
+            user = self._me(admin=True)
+            if user is None or user is False:
+                return self._send(403, {"error": "无权限"})
+            name = str(data.get("name", "")).strip()
+            try:
+                with _lock, db() as conn:
+                    res = config_rollback(conn, name, user["username"])
+                    log(conn, user["id"], user["username"], "config_rollback",
+                        f"回滚参数 {name} → {res['value']}（v{res['version']}）", ip=ip)
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
+            return self._send(200, {"ok": True, "name": name, **res})
 
         self._send(404, {"error": "接口不存在"})
 

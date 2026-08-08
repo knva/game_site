@@ -4,12 +4,14 @@
 管理员判定:登录用户 role=admin(me(admin=True) 返回 False 时一律 403,与原实现一致)。
 """
 import time
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Request
 
 from . import config
 from .auth import get_user_by_name, me
 from .db import _lock, db
+from .gameconfig import admin_config_list, config_publish, config_rollback, config_set
 from .http import json_response, parse_body
 from .wallet import change_points, log
 
@@ -214,6 +216,161 @@ def admin_dashboard(request: Request):
         "points_total": points_total,
         "balance_dist": balance_dist,
     })
+
+
+# ---------------- Issue #20:积分经济中心 / 通胀告警 ----------------
+def _admin_economy(conn):
+    """积分经济聚合:业务收支 / 近 14 天净增 / 余额分布 / 通胀告警。
+    所有数值直接 SUM point_ledger,与流水总和一致。"""
+    day_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+
+    def _sum_col(case):
+        return conn.execute(
+            f"SELECT COALESCE(SUM({case}),0) s FROM point_ledger WHERE created_at>=?",
+            (day_start,)).fetchone()["s"]
+
+    by_business = {}
+    for r in conn.execute(
+            "SELECT business, "
+            "SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) AS amount_in, "
+            "SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END) AS amount_out "
+            "FROM point_ledger GROUP BY business").fetchall():
+        by_business[r["business"]] = {"amount_in": r["amount_in"], "amount_out": r["amount_out"]}
+
+    daily_net = []
+    for i in range(13, -1, -1):
+        d = (date.today() - timedelta(days=i)).isoformat()
+        s = time.mktime(time.strptime(d, "%Y-%m-%d"))
+        row = conn.execute(
+            "SELECT SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) AS produced, "
+            "SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END) AS consumed "
+            "FROM point_ledger WHERE created_at>=? AND created_at<?", (s, s + 86400)).fetchone()
+        produced = row["produced"] or 0
+        consumed = row["consumed"] or 0
+        daily_net.append({"date": d, "produced": produced, "consumed": consumed, "net": produced - consumed})
+
+    tiers = [("0~100", 0, 100), ("100~1000", 100, 1000), ("1000~10000", 1000, 10000), ("10000+", 10000, None)]
+    distribution = []
+    for label, lo, hi in tiers:
+        if hi is None:
+            c = conn.execute("SELECT COUNT(*) c FROM users WHERE points>=?", (lo,)).fetchone()["c"]
+        else:
+            c = conn.execute("SELECT COUNT(*) c FROM users WHERE points>=? AND points<?",
+                             (lo, hi)).fetchone()["c"]
+        distribution.append({"range": label, "users": c})
+
+    alerts = []
+    for r in conn.execute(
+            "SELECT username, SUM(amount) net FROM point_ledger WHERE created_at>=? "
+            "GROUP BY user_id, username HAVING SUM(amount)>5000 ORDER BY net DESC",
+            (day_start,)).fetchall():
+        alerts.append({"type": "user_surge", "level": "high",
+                       "msg": f"用户「{r['username']}」今日净增 {r['net']} 积分（阈值 5000）"})
+    biz_today = conn.execute(
+        "SELECT business, SUM(amount) produced FROM point_ledger WHERE created_at>=? AND amount>0 "
+        "GROUP BY business", (day_start,)).fetchall()
+    if biz_today:
+        avg = sum(r["produced"] for r in biz_today) / len(biz_today)
+        for r in biz_today:
+            if avg > 0 and r["produced"] > avg * 5:
+                alerts.append({"type": "business_surge", "level": "medium",
+                               "msg": f"业务「{r['business']}」今日产出 {r['produced']}，超过全站均值 {avg:.0f} 的 5 倍"})
+    today_produced = _sum_col("CASE WHEN amount>0 THEN amount ELSE 0 END")
+    today_consumed = _sum_col("CASE WHEN amount<0 THEN -amount ELSE 0 END")
+    today_net = today_produced - today_consumed
+    if today_net > 50000:
+        alerts.append({"type": "total_net", "level": "warning",
+                       "msg": f"全站今日净增 {today_net} 积分（阈值 50000）"})
+
+    return {
+        "by_business": by_business,
+        "daily_net": daily_net,
+        "distribution": distribution,
+        "alerts": alerts,
+        "summary": {"produced": today_produced, "consumed": today_consumed, "net": today_net},
+    }
+
+
+@router.get("/api/admin/economy")
+def admin_economy(request: Request):
+    user, err = _admin_or_403(request)
+    if err is not None:
+        return err
+    with _lock, db() as conn:
+        data = _admin_economy(conn)
+    return json_response(200, data)
+
+
+# ---------------- Issue #21:游戏参数配置(draft/publish/rollback) ----------------
+@router.get("/api/admin/config/list")
+def admin_config_list(request: Request):
+    user, err = _admin_or_403(request)
+    if err is not None:
+        return err
+    with _lock, db() as conn:
+        data = admin_config_list(conn)
+    return json_response(200, data)
+
+
+@router.post("/api/admin/config/set")
+async def admin_config_set(request: Request):
+    data = await parse_body(request)
+    if data is None:
+        return json_response(400, {"error": "请求格式错误"})
+    ip = request.client.host if request.client else ""
+    user, err = _admin_or_403(request)
+    if err is not None:
+        return err
+    name = str(data.get("name", "")).strip()
+    value = data.get("value")
+    try:
+        with _lock, db() as conn:
+            ver = config_set(conn, name, value, user["username"])
+            log(conn, user["id"], user["username"], "config_set",
+                f"修改参数 {name} → {value}（草稿 v{ver}）", ip=ip)
+    except ValueError as e:
+        return json_response(400, {"error": str(e)})
+    return json_response(200, {"ok": True, "name": name, "version": ver})
+
+
+@router.post("/api/admin/config/publish")
+async def admin_config_publish(request: Request):
+    data = await parse_body(request)
+    if data is None:
+        return json_response(400, {"error": "请求格式错误"})
+    ip = request.client.host if request.client else ""
+    user, err = _admin_or_403(request)
+    if err is not None:
+        return err
+    name = str(data.get("name", "")).strip()
+    try:
+        with _lock, db() as conn:
+            ver = config_publish(conn, name, user["username"])
+            log(conn, user["id"], user["username"], "config_publish",
+                f"发布参数 {name}（v{ver}）", ip=ip)
+    except ValueError as e:
+        return json_response(400, {"error": str(e)})
+    return json_response(200, {"ok": True, "name": name, "version": ver})
+
+
+@router.post("/api/admin/config/rollback")
+async def admin_config_rollback(request: Request):
+    data = await parse_body(request)
+    if data is None:
+        return json_response(400, {"error": "请求格式错误"})
+    ip = request.client.host if request.client else ""
+    user, err = _admin_or_403(request)
+    if err is not None:
+        return err
+    name = str(data.get("name", "")).strip()
+    try:
+        with _lock, db() as conn:
+            res = config_rollback(conn, name, user["username"])
+            log(conn, user["id"], user["username"], "config_rollback",
+                f"回滚参数 {name} → {res['value']}（v{res['version']}）", ip=ip)
+    except ValueError as e:
+        return json_response(400, {"error": str(e)})
+    return json_response(200, {"ok": True, "name": name, **res})
 
 
 # ---------------- Issue #19:用户详情 / 封禁理由 / 会话管理 ----------------

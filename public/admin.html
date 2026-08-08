@@ -30,6 +30,33 @@
   </div>
 
   <div class="game-panel">
+    <h2>💰 经济中心 <span class="sub">汇总自 point_ledger 流水 · 通胀告警</span></h2>
+    <div class="stat-cards" id="eco-cards"></div>
+    <div class="dash-grid">
+      <div class="dash-col">
+        <h4>📊 近 14 天净增</h4>
+        <div id="eco-daily" style="max-height:230px;overflow:auto"></div>
+      </div>
+      <div class="dash-col">
+        <h4>🏆 业务 TOP（入+出）</h4>
+        <div id="eco-biz"></div>
+        <h4>⚖️ 余额分布</h4>
+        <div id="eco-dist" style="font-size:13px;line-height:1.8"></div>
+      </div>
+    </div>
+    <h4 style="color:var(--muted);font-size:13px;margin:12px 0 6px">🚨 通胀告警</h4>
+    <ul class="bottle-feed" id="eco-alerts"></ul>
+  </div>
+
+  <div class="game-panel">
+    <h2>⚙️ 参数配置 <span class="sub">草稿 · 发布 · 回滚</span></h2>
+    <table class="tbl"><thead>
+      <tr><th>参数</th><th>默认</th><th>当前(已发布)</th><th>草稿</th><th>操作</th></tr>
+    </thead><tbody id="cfg-tbody"></tbody></table>
+    <p style="color:var(--muted);font-size:12px;margin-top:8px">编辑后点"保存草稿"，再点"发布"立即生效；"回滚"发布上一个已发布版本（无历史则回滚到默认值）。</p>
+  </div>
+
+  <div class="game-panel">
     <h2>👥 用户管理 <span class="sub">搜索昵称 · 调整余额 · 封禁/解封</span></h2>
     <div class="toolbar">
       <input id="u-search" placeholder="搜索昵称" style="flex:1">
@@ -264,6 +291,61 @@ document.getElementById("a-send").onclick = () => {
     .catch(e => toast(e.message, "err"));
 };
 
+async function loadEconomy() {
+  try {
+    const e = await Api.adminEconomy();
+    document.getElementById("eco-cards").innerHTML = [
+      ["📤", e.summary.produced, "今日产出"], ["📥", e.summary.consumed, "今日消耗"],
+      ["📈", e.summary.net, "今日净增"], ["🚨", e.alerts.length, "告警"],
+    ].map(([i, v, k]) => `<div class="stat-card"><div class="v">${i} ${v}</div><div class="k">${k}</div></div>`).join("");
+    const biz = Object.entries(e.by_business)
+      .map(([name, v]) => ({ name, in: v.amount_in, out: v.amount_out, net: v.amount_in - v.amount_out }))
+      .sort((x, y) => (y.in + y.out) - (x.in + x.out));
+    document.getElementById("eco-biz").innerHTML = biz.length
+      ? `<table class="tbl"><thead><tr><th>业务</th><th>入</th><th>出</th><th>净</th></tr></thead><tbody>${biz.slice(0, 12).map(b => `
+          <tr><td>${escapeHtml(b.name)}</td><td class="num">${b.in}</td><td class="num">${b.out}</td><td class="num">${b.net}</td></tr>`).join("")}</tbody></table>`
+      : '<p>暂无流水</p>';
+    document.getElementById("eco-dist").innerHTML =
+      e.distribution.map(d => `${escapeHtml(d.range)}: <b>${d.users}</b> 人`).join(" · ");
+    document.getElementById("eco-daily").innerHTML = `<table class="tbl"><thead><tr><th>日期</th><th>产出</th><th>消耗</th><th>净增</th></tr></thead><tbody>${e.daily_net.map(d => `
+      <tr><td class="mono">${d.date}</td><td class="num">${d.produced}</td><td class="num">${d.consumed}</td>
+      <td class="num" style="color:${d.net >= 0 ? "var(--ok)" : "var(--bad)"}">${d.net}</td></tr>`).join("")}</tbody></table>`;
+    document.getElementById("eco-alerts").innerHTML = e.alerts.length
+      ? e.alerts.map(al => `<li class="bottle-item" style="color:${al.level === "high" ? "var(--bad)" : al.level === "medium" ? "var(--gold)" : "var(--muted)"}">⚠️ ${escapeHtml(al.msg)}</li>`).join("")
+      : '<li class="bottle-item">暂无告警 ✅</li>';
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function loadConfigs() {
+  try {
+    const { list } = await Api.configList();
+    document.getElementById("cfg-tbody").innerHTML = list.map(c => `
+      <tr>
+        <td>${escapeHtml(c.name)} <span style="color:var(--muted)">(${escapeHtml(c.desc)})</span></td>
+        <td class="num">${c.default}</td>
+        <td class="num">${c.value}${c.published_version ? `<span style="color:var(--muted)"> v${c.published_version}</span>` : ""}</td>
+        <td><input id="cfg-${escapeHtml(c.name)}" type="number" value="${c.draft ? c.draft.value : c.value}" style="width:120px"></td>
+        <td style="white-space:nowrap">
+          <button class="mini-btn" onclick="configSave('${escapeHtml(c.name)}')">保存草稿</button>
+          <button class="mini-btn" onclick="configPublish('${escapeHtml(c.name)}')">发布</button>
+          <button class="mini-btn" onclick="configRollback('${escapeHtml(c.name)}')">回滚</button>
+        </td>
+      </tr>`).join("");
+  } catch (e) { toast(e.message, "err"); }
+}
+function configSave(name) {
+  const v = document.getElementById("cfg-" + name).value;
+  Api.configSet(name, v).then(() => { toast("草稿已保存", "ok"); loadConfigs(); }).catch(e => toast(e.message, "err"));
+}
+function configPublish(name) {
+  if (!confirm(`确认发布参数 ${name}？发布后立即生效。`)) return;
+  Api.configPublish(name).then(() => { toast("已发布", "ok"); loadConfigs(); }).catch(e => toast(e.message, "err"));
+}
+function configRollback(name) {
+  if (!confirm(`确认回滚参数 ${name} 到上一个已发布版本？`)) return;
+  Api.configRollback(name).then(() => { toast("已回滚", "ok"); loadConfigs(); }).catch(e => toast(e.message, "err"));
+}
+
 let lpage = 1;
 async function loadLogs() {
   try {
@@ -307,7 +389,7 @@ function delBottle(id) {
     const { user } = await Api.me();
     if (user.role !== "admin") { toast("无权限访问", "err"); location.href = "/"; return; }
   } catch (e) { toast("请先登录", "err"); location.href = "/"; return; }
-  loadStats(); loadDashboard(); loadUsers(); loadLogs(); loadBottles();
+  loadStats(); loadDashboard(); loadEconomy(); loadConfigs(); loadUsers(); loadLogs(); loadBottles();
 })();
 </script>
 </body>

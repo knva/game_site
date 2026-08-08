@@ -249,4 +249,12 @@ def init_db():
             key TEXT PRIMARY KEY,
             count INTEGER NOT NULL,
             window_start REAL NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS game_configs(
+            name TEXT NOT NULL,
+            value TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'draft',
+            updated_by TEXT,
+            created_at REAL NOT NULL,
+            PRIMARY KEY(name, version))""")
         conn.commit()
