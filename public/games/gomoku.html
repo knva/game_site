@@ -271,7 +271,7 @@ function applyState(s) {
 function connectRoom(code) {
   if (es) es.close();
   clearInterval(pollTimer);
-  es = new EventSource(`/api/gomoku/stream?code=${code}&token=${Store.token}`);
+  es = new EventSource(`/api/gomoku/stream?code=${code}`);
   es.onmessage = (ev) => {
     if (!ev.data || ev.data === "refresh" || ev.data === "null") return;
     try { applyState(JSON.parse(ev.data)); } catch (e) {}

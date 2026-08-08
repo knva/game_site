@@ -507,7 +507,7 @@ document.getElementById("dm-collect").onclick = async () => {
 (async () => {
   buildReels();
   renderPaytable();
-  if (Store.token) {
+  if (Store.user) {
     try {
       const { user } = await Api.me();
       points = user.points;
