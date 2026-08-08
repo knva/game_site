@@ -1264,6 +1264,22 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
+        """统一入口:捕获积分不足(ValueError→400)与未预期异常(→500),事务整体回滚"""
+        try:
+            return self._do_post()
+        except ValueError as e:
+            try:
+                return self._send(400, {"error": str(e)})
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.log_error("POST %s: %s", self.path, repr(e)[:300])
+                return self._send(500, {"error": "服务器内部错误"})
+            except Exception:
+                pass
+
+    def _do_post(self):
         path = urllib.parse.urlparse(self.path).path
         data = self._body()
         if data is None:
