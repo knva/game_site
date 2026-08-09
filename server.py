@@ -25,6 +25,25 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PUBLIC_DIR = os.path.join(BASE_DIR, "public")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "game.db")
+# Issue #17:数据库地址从环境变量 DATABASE_URL 读取(sqlite:///path 或纯路径);
+# PostgreSQL(postgres://)未适配时打印提示并降级默认 SQLite,与 app/db.py 行为一致。
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+if DATABASE_URL.startswith("postgres://") or DATABASE_URL.startswith("postgresql://"):
+    print("⚠️ DATABASE_URL 指定了 PostgreSQL,但本项目尚未适配 psycopg2 与 SQL。"
+          "需要安装 psycopg2 并适配 SQL 后重启;当前自动降级为 SQLite(data/game.db)。", flush=True)
+    DATABASE_URL = ""
+if DATABASE_URL.startswith("sqlite:///"):
+    DB_PATH = DATABASE_URL[len("sqlite:///"):]
+    if DB_PATH.startswith("file:"):
+        DB_PATH = DB_PATH[len("file:"):].split("?", 1)[0]
+    DB_PATH = os.path.abspath(os.path.expanduser(DB_PATH))
+    DATA_DIR = os.path.dirname(DB_PATH)
+elif DATABASE_URL.startswith("sqlite:"):
+    DB_PATH = os.path.abspath(os.path.expanduser(DATABASE_URL[len("sqlite:"):]))
+    DATA_DIR = os.path.dirname(DB_PATH)
+elif DATABASE_URL:
+    DB_PATH = os.path.abspath(os.path.expanduser(DATABASE_URL))
+    DATA_DIR = os.path.dirname(DB_PATH)
 PORT = int(os.environ.get("PORT", "8000"))
 ADMIN_USERS = [u.strip() for u in os.environ.get("ADMIN_USERS", "").split(",") if u.strip()]
 # 部署时通过环境变量指定初始管理员(逗号分隔用户名),注册时/启动时提升为 admin
@@ -1251,12 +1270,14 @@ def compute_streak(conn, user_id):
     days = {r["day"] for r in rows}
     streak = 0
     d = date.today()
-    if d.isoformat() in days:
+    checked_today = d.isoformat() in days
+    if checked_today:
         d -= timedelta(days=1)
     while d.isoformat() in days:
         streak += 1
         d -= timedelta(days=1)
-    return streak
+    # Issue #56:今天已签到是连续天数的一部分,回退计数后需 +1 补回
+    return streak + (1 if checked_today else 0)
 
 
 def checkin_reward(streak_day, vip=False):
@@ -1334,19 +1355,25 @@ def stamina_state(conn, user_row):
     """返回当前体力并结算在线恢复"""
     now = time.time()
     cur = user_row["stamina"]
-    if user_row["stamina_at"] > 0:
-        gained = int((now - user_row["stamina_at"]) // STAMINA_REGEN_SECONDS)
+    stamp = user_row["stamina_at"] or now
+    if stamp > 0:
+        elapsed = now - stamp
+        gained = int(elapsed // STAMINA_REGEN_SECONDS)
         if gained > 0:
+            # Issue #57:恢复时保留不足一个周期的余量(stamina_at 只推进整数周期,
+            # 例如 599 秒恢复 1 点后余 299 秒计入下次,不丢失未满周期的进度)。
+            carry = elapsed % STAMINA_REGEN_SECONDS
             cur = min(STAMINA_MAX, cur + gained)
+            stamp = (now - carry) if cur < STAMINA_MAX else 0
             conn.execute("UPDATE users SET stamina=?, stamina_at=? WHERE id=?",
-                         (cur, now, user_row["id"]))
+                         (cur, stamp, user_row["id"]))
             conn.commit()
     if cur >= STAMINA_MAX:
         next_in = 0
-        conn.execute("UPDATE users SET stamina_at=0 WHERE id=?", (user_row["id"],))
-        conn.commit()
+        if stamp != 0:
+            conn.execute("UPDATE users SET stamina_at=0 WHERE id=?", (user_row["id"],))
+            conn.commit()
     else:
-        stamp = user_row["stamina_at"] or now
         next_in = STAMINA_REGEN_SECONDS - int((now - stamp) % STAMINA_REGEN_SECONDS)
     return {"current": cur, "max": STAMINA_MAX,
             "next_in": next_in, "steal_cost": STEAL_STAMINA_COST}
