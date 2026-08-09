@@ -311,7 +311,10 @@ function genWorld() {
     el.style.animationDelay = -(Math.random() * 1.2) + "s";
     el.innerHTML = '<div class="i"></div>';
     itemsLayer.appendChild(el);
-    items.push({ ...g, x, y, vx: 0, vy: 0, grabbed: false, spin: rnd() * 6.28, el });
+    // id = 生成序下标,与服务器 gen_goldminer_world 一致(结算按 id 校验)。
+    // 注意:spin 使用 Math.random() 而非种子 rnd(),避免额外消耗种子 RNG 导致
+    // 前后端矿图序列分叉(分叉会让结算按 id 校验失败)。
+    items.push({ ...g, id: items.length, x, y, vx: 0, vy: 0, grabbed: false, spin: Math.random() * 6.28, el });
   }
 }
 
@@ -496,7 +499,7 @@ function animate(t) {
         toast("绳子断了！", "err");
       } else if (h.len <= 8) {
         score += it.v;
-        caught.push({ v: it.v });
+        caught.push({ id: it.id, v: it.v });
         burst(it.x, it.y, it.type === "diamond" ? "#81d4fa" : "#ffd54f", 30);
         popup(`+${it.v}`, it.x, it.y - 20);
         it.grabbed = false;

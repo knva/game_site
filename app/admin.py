@@ -28,8 +28,8 @@ def ensure_admins():
             u = get_user_by_name(conn, n)
             if u and u["role"] != "admin":
                 conn.execute("UPDATE users SET role='admin' WHERE id=?", (u["id"],))
-                conn.commit()
                 log(conn, u["id"], n, "admin_op", "预设管理员提升")
+                conn.commit()
 
 
 def _admin_or_403(request):
@@ -328,6 +328,7 @@ async def admin_config_set(request: Request):
             ver = config_set(conn, name, value, user["username"])
             log(conn, user["id"], user["username"], "config_set",
                 f"修改参数 {name} → {value}（草稿 v{ver}）", ip=ip)
+            conn.commit()
     except ValueError as e:
         return json_response(400, {"error": str(e)})
     return json_response(200, {"ok": True, "name": name, "version": ver})
@@ -348,6 +349,7 @@ async def admin_config_publish(request: Request):
             ver = config_publish(conn, name, user["username"])
             log(conn, user["id"], user["username"], "config_publish",
                 f"发布参数 {name}（v{ver}）", ip=ip)
+            conn.commit()
     except ValueError as e:
         return json_response(400, {"error": str(e)})
     return json_response(200, {"ok": True, "name": name, "version": ver})
@@ -368,6 +370,7 @@ async def admin_config_rollback(request: Request):
             res = config_rollback(conn, name, user["username"])
             log(conn, user["id"], user["username"], "config_rollback",
                 f"回滚参数 {name} → {res['value']}（v{res['version']}）", ip=ip)
+            conn.commit()
     except ValueError as e:
         return json_response(400, {"error": str(e)})
     return json_response(200, {"ok": True, "name": name, **res})
@@ -443,9 +446,9 @@ async def admin_kick_session(request: Request):
             return json_response(400, {"error": "用户不存在"})
         cur = conn.execute("DELETE FROM sessions WHERE user_id=?", (target["id"],))
         kicked = cur.rowcount
-        conn.commit()
         log(conn, user["id"], user["username"], "admin_op",
             f"强制下线 {target['username']}(注销 {kicked} 个会话)", ip=ip)
+        conn.commit()
     return json_response(200, {"ok": True, "kicked": kicked})
 
 
@@ -473,6 +476,7 @@ async def admin_set_balance(request: Request):
         points = change_points(conn, uid, target["username"], amount,
                                "admin_balance", f"管理员调整余额 {note}".strip(), ip)
         log(conn, user["id"], user["username"], "admin_op", f"给 {target['username']} 调整余额", amount, ip)
+        conn.commit()
     return json_response(200, {"ok": True, "points": points})
 
 
@@ -499,11 +503,11 @@ async def admin_toggle_status(request: Request):
         new = "banned" if target["status"] == "active" else "active"
         conn.execute("UPDATE users SET status=? WHERE id=?", (new, uid))
         conn.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
-        conn.commit()
         detail = f"封禁/解封 {target['username']} → {new}"
         if reason:
             detail += f"，理由：{reason}"
         log(conn, user["id"], user["username"], "admin_op", detail, ip=ip)
+        conn.commit()
     return json_response(200, {"ok": True, "status": new})
 
 
@@ -527,8 +531,8 @@ async def admin_mail(request: Request):
             return json_response(400, {"error": "用户不存在"})
         conn.execute("INSERT INTO mail(from_id,to_id,title,content,mtype,created_at) VALUES(?,?,?,?,?,?)",
                      (user["id"], target["id"], title, content, "system", time.time()))
-        conn.commit()
         log(conn, user["id"], user["username"], "admin_mail", f"系统信件给 {to}", ip=ip)
+        conn.commit()
     return json_response(200, {"ok": True})
 
 
@@ -547,6 +551,6 @@ async def admin_del_bottle(request: Request):
         return json_response(400, {"error": "参数错误"})
     with _lock, db() as conn:
         conn.execute("DELETE FROM bottles WHERE id=?", (bid,))
-        conn.commit()
         log(conn, user["id"], user["username"], "admin_op", f"删除漂流瓶 #{bid}", ip=ip)
+        conn.commit()
     return json_response(200, {"ok": True})

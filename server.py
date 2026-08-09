@@ -45,6 +45,11 @@ SUBMIT_PER_DAY = 40
 DAILY_EARNED_CAP = 30000
 RHYTHM_BPM = 132
 RHYTHM_SONG_SEC = 80
+# Issue #47:音乐游戏结算真实时长校验参数(防回传谱面刷满分)
+RHYTHM_COVERAGE_MIN = 0.7      # 时间线覆盖时长(末键-首键) / 谱面时长 下限
+RHYTHM_DENSITY_TOL = 4         # 同 1 秒内按键数容差:谱面同秒音符数 + 该容差
+RHYTHM_ELAPSED_TOL = 15        # 时间线末键相对服务器真实经过时长的容差(秒,防立即回传)
+RHYTHM_END_TOLERANCE = 20      # 时间线末键到达谱面结尾的容差(秒,容错暂停/延迟/早退)
 
 CROPS = {
     "carrot": {"name": "萝卜", "emoji": "🥕", "cost": 5, "sell": 9, "grow": 25},
@@ -167,7 +172,9 @@ def _gm_mulberry32(a):
 
 
 def gen_goldminer_world(seed):
-    """复刻前端 genWorld:固定 seed 生成 26 个矿(位置+类型+分值)"""
+    """复刻前端 genWorld:固定 seed 生成 26 个矿(位置+类型+分值+稳定物品 ID)。
+    Issue #48:每个矿按生成序分配稳定 id(=下标),服务端与前端按同一 RNG 序列
+    (前端已移除 spin 对种子 RNG 的额外消耗)生成顺序一致,结算按 id 校验抓取轨迹。"""
     rnd = _gm_mulberry32(seed & 0xFFFFFFFF)
     items = []
     guard = 0
@@ -186,7 +193,7 @@ def gen_goldminer_world(seed):
         r = chosen["r"]
         if any(((o["x"] - x) ** 2 + (o["y"] - y) ** 2) ** 0.5 < o["r"] + r + 6 for o in items):
             continue
-        items.append({**chosen, "x": x, "y": y})
+        items.append({**chosen, "id": len(items), "x": x, "y": y})
     return items
 
 
@@ -711,9 +718,10 @@ def auth_user(conn, token):
 
 # ---------------- 日志 ----------------
 def log(conn, user_id, username, action, detail="", amount=None, ip=""):
+    """写入审计日志。Issue #49:不再内部 commit,与调用方其余 SQL 同事务,
+    由调用方显式 commit 或外层 `with db() as conn:` 块退出时统一提交(保证原子性)。"""
     conn.execute("INSERT INTO logs(user_id,username,action,detail,amount,ip,at) VALUES(?,?,?,?,?,?,?)",
                  (user_id, username, action, detail, amount, ip, time.time()))
-    conn.commit()
 
 
 def admin_audit(conn, admin_id, admin_name, action, target=None, before_value=None,
@@ -781,11 +789,13 @@ def rate_check(key, limit, window, now=None):
 
 
 def daily_earned(name, today):
-    """今日已赚积分:从 logs 聚合(game_award/farm_harvest),持久化可靠"""
+    """今日已赚积分:按用户聚合 point_ledger 当日正向流水(amount>0)。
+    Issue #45:不再依赖 logs 的 action 白名单(会遗漏 farm_sell/slot_win/wheel_spin/
+    admin_balance/checkin 等正向收益),point_ledger 为权威流水,与 #2 一致。"""
     with _lock, db() as conn:
         day_start = time.mktime(time.strptime(today, "%Y-%m-%d"))
-        row = conn.execute("SELECT COALESCE(SUM(amount),0) s FROM logs "
-                           "WHERE username=? AND action IN ('game_award','farm_harvest') AND at>=?",
+        row = conn.execute("SELECT COALESCE(SUM(amount),0) s FROM point_ledger "
+                           "WHERE username=? AND amount>0 AND created_at>=?",
                            (name, day_start)).fetchone()
         return row["s"]
 
@@ -822,12 +832,16 @@ def _rate_peek(key, window):
 # ---------------- 用户余额（所有变动都走这里 + 不可变流水 + 日志） ----------------
 def change_points(conn, user_id, username, amount, action, detail="", ip="", idem_key=None):
     """统一积分变动入口:更新余额 + 写 point_ledger 不可变流水 + 写日志。
-    idem_key 非空时幂等:同一业务单号只生效一次(防重复发奖/扣款)。"""
+    idem_key 非空时幂等:同一业务单号只生效一次(防重复发奖/扣款)。
+
+    Issue #49:本函数内部不做提交(原 log() 内部 conn.commit 已移除),「余额+流水+日志」
+    与调用方其余 SQL 同属一个事务,由调用方显式 commit 或外层 `with db() as conn:`
+    退出时统一提交——整体成功则一次提交,后续任一步失败 rollback 时全部回滚,
+    恢复「扣款+发货+流水」真正的事务原子性。"""
     with _lock:
         if idem_key:
             exists = conn.execute("SELECT 1 FROM point_ledger WHERE biz_no=?", (idem_key,)).fetchone()
             if exists:
-                conn.commit()
                 return conn.execute("SELECT points FROM users WHERE id=?", (user_id,)).fetchone()["points"]
         if amount < 0:
             cur = conn.execute("UPDATE users SET points = points + ? WHERE id=? AND points + ? >= 0",
@@ -1910,8 +1924,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, {"bottle": None})
                 conn.execute("UPDATE bottles SET picked=1, picked_by=?, views=views+1 WHERE id=?",
                              (user["username"], row["id"]))
-                conn.commit()
                 log(conn, user["id"], user["username"], "bottle_pick", f"捡起第{row['id']}号漂流瓶")
+                conn.commit()
                 return self._send(200, {"bottle": dict(row)})
 
         if path == "/api/admin/users":
@@ -2155,7 +2169,7 @@ class Handler(BaseHTTPRequestHandler):
                 s["bottles"] = conn.execute("SELECT COUNT(*) c FROM bottles").fetchone()["c"]
                 s["mail"] = conn.execute("SELECT COUNT(*) c FROM mail").fetchone()["c"]
                 s["earned_today"] = conn.execute(
-                    "SELECT COALESCE(SUM(amount),0) s FROM logs WHERE action IN ('game_award','farm_harvest') AND at>?",
+                    "SELECT COALESCE(SUM(amount),0) s FROM point_ledger WHERE amount>0 AND created_at>=?",
                     (time.time() - 86400,)).fetchone()["s"]
             return self._send(200, s)
 
@@ -2351,6 +2365,7 @@ class Handler(BaseHTTPRequestHandler):
                 token = new_session(conn, uid, ip)
                 self._set_session_cookie(token)
                 log(conn, uid, username, "register", "新用户注册", ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True, "token": token, "user": {
                 "id": uid, "username": username, "points": WELCOME_POINTS, "role": role},
                 "msg": f"注册成功，赠送 {WELCOME_POINTS} 积分！"})
@@ -2369,8 +2384,8 @@ class Handler(BaseHTTPRequestHandler):
                 token = new_session(conn, row["id"], ip)
                 self._set_session_cookie(token)
                 conn.execute("UPDATE users SET last_login=? WHERE id=?", (time.time(), row["id"]))
-                conn.commit()
                 log(conn, row["id"], username, "login", "登录成功", ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True, "token": token, "user": {
                 "id": row["id"], "username": username, "points": row["points"], "role": row["role"]}})
 
@@ -2382,9 +2397,9 @@ class Handler(BaseHTTPRequestHandler):
                 row = conn.execute("SELECT * FROM sessions WHERE token=?", (token,)).fetchone()
                 if row:
                     conn.execute("DELETE FROM sessions WHERE token=?", (token,))
-                    conn.commit()
                     u = conn.execute("SELECT * FROM users WHERE id=?", (row["user_id"],)).fetchone()
                     log(conn, row["user_id"], u["username"] if u else "?", "logout", "退出登录", ip=ip)
+                    conn.commit()
             self._clear_session_cookie()
             return self._send(200, {"ok": True})
 
@@ -2500,8 +2515,8 @@ class Handler(BaseHTTPRequestHandler):
                              (token, user["id"], game, seed,
                               json.dumps(chart) if chart else None, max_score,
                               time.time(), time.time() + GAME_SESSION_MINUTES * 60))
-                conn.commit()
                 log(conn, user["id"], user["username"], "game_start", f"开始游戏 {game}", ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True, "token": token, "game": game,
                                     "chart": chart, "max_score": max_score,
                                     "goldminer_seed": seed if game == "goldminer" else None,
@@ -2525,13 +2540,14 @@ class Handler(BaseHTTPRequestHandler):
             if game not in GAMES:
                 return self._send(400, {"error": "未知游戏"})
             today = time.strftime("%Y-%m-%d")
-            if not rate_check(f"gend:{user['username']}:{game}", SUBMIT_PER_HOUR, 3600):
+            # Issue #46:小时/每日限流使用独立持久化桶(避免共用 key 不同 window 互相覆盖)
+            if not rate_check(f"gend_h:{user['username']}:{game}", SUBMIT_PER_HOUR, 3600):
                 # Issue #22:单小时提交结算次数超限 → 风险事件
                 with _lock, db() as conn:
                     _add_risk_event(conn, user["id"], user["username"], "submit_burst", "medium",
                                     f"{GAMES[game]['name']} 单小时提交结算超限")
                 return self._send(429, {"error": "本小时提交次数已达上限"})
-            if not rate_check(f"gend:{user['username']}:{game}", SUBMIT_PER_DAY, 86400):
+            if not rate_check(f"gend_d:{user['username']}:{game}", SUBMIT_PER_DAY, 86400):
                 return self._send(429, {"error": "今日提交次数已达上限"})
             if not rate_check(f"gendip:{ip}", 30, 3600):
                 return self._send(429, {"error": "提交过于频繁"})
@@ -2562,30 +2578,68 @@ class Handler(BaseHTTPRequestHandler):
                             return self._send(400, {"error": "按键数据异常，提交被拒绝"})
                         if 0 <= t <= 85 and 0 <= lane < 8:
                             tl.append({"t": t, "lane": lane})
+                    # Issue #47:校验时间线是否具备真实游玩时长特征(防把谱面原样转时间线刷满分)
+                    if not tl:
+                        return self._send(400, {"error": "对局时长异常"})
+                    chart_times = sorted(n["t"] for n in chart)
+                    chart_last = chart_times[-1]
+                    chart_span = max(chart_last - chart_times[0], 1)
+                    tl_ts = sorted(k["t"] for k in tl)
+                    tl_first, tl_last = tl_ts[0], tl_ts[-1]
+                    elapsed = time.time() - sess["created_at"]   # 开局已记录真实开始时间
+                    # ① 真实经过时长必须覆盖时间线声称的末键时间(立即回传谱面 → 不满足)
+                    if tl_last > elapsed + RHYTHM_ELAPSED_TOL:
+                        return self._send(400, {"error": "对局时长异常"})
+                    # ② 末键必须(近似)到达谱面最后一个音符(必须真实玩到结尾附近)
+                    if tl_last < chart_last - RHYTHM_END_TOLERANCE:
+                        return self._send(400, {"error": "对局时长异常"})
+                    # ③ 时间线覆盖时长(末键-首键)与谱面时长比例 >= 阈值(容错暂停/延迟)
+                    if tl_last - tl_first < RHYTHM_COVERAGE_MIN * chart_span:
+                        return self._send(400, {"error": "对局时长异常"})
+                    # ④ 按键密度:同 1 秒内按键数 <= 谱面同秒音符数 + 容差(防复制粘贴/狂点)
+                    chart_sec = {}
+                    for n in chart:
+                        chart_sec[int(n["t"])] = chart_sec.get(int(n["t"]), 0) + 1
+                    tl_sec = {}
+                    for k in tl:
+                        tl_sec[int(k["t"])] = tl_sec.get(int(k["t"]), 0) + 1
+                    for sec, cnt in tl_sec.items():
+                        if cnt > chart_sec.get(sec, 0) + RHYTHM_DENSITY_TOL:
+                            return self._send(400, {"error": "对局时长异常"})
                     p, g, m, server_score = judge_rhythm(chart, tl)
                     if p + g + m != len(chart):
                         pass  # 允许早退(未按键的音符记 miss 已在重判内)
                     score = min(server_score, max_score)
                 earned = min(score, max_score)
                 if game == "goldminer":
-                    # 服务器用 seed 重算地图,校验抓取轨迹(防伪造分数)
+                    # Issue #48:服务器用 seed 重算地图(每个矿带稳定物品 ID),按 ID 集合校验抓取轨迹
                     catches = stats.get("catches")
                     if not isinstance(catches, list) or len(catches) > GOLDMINER_ITEMS:
                         return self._send(400, {"error": "抓取数据异常"})
                     world = gen_goldminer_world(sess["seed"])
-                    avail = {}
-                    for it in world:
-                        avail[it["v"]] = avail.get(it["v"], 0) + 1
+                    world_by_id = {it["id"]: it for it in world}
                     total_v = 0
+                    seen = set()
                     for c in catches:
-                        try:
-                            v = int(c.get("v", -1))
-                        except Exception:
+                        if not isinstance(c, dict) or "id" not in c:
+                            # 兼容性:旧格式(无 id)拒绝
                             return self._send(400, {"error": "抓取数据异常"})
-                        if avail.get(v, 0) <= 0:
+                        try:
+                            cid = int(c["id"])
+                        except (TypeError, ValueError):
+                            return self._send(400, {"error": "抓取数据异常"})
+                        if cid in seen or cid not in world_by_id:
                             return self._send(400, {"error": "抓取数据与地图不符"})
-                        avail[v] -= 1
-                        total_v += v
+                        seen.add(cid)
+                        it = world_by_id[cid]
+                        if "v" in c:
+                            try:
+                                v = int(c["v"])
+                            except (TypeError, ValueError):
+                                return self._send(400, {"error": "抓取数据异常"})
+                            if v != it["v"]:
+                                return self._send(400, {"error": "抓取数据与地图不符"})
+                        total_v += it["v"]
                     if score != total_v:
                         return self._send(400, {"error": "分数与抓取记录不符"})
                     earned = random.randint(config_get("goldminer_pay_min", GOLDMINER_PAY_MIN),
@@ -2612,6 +2666,7 @@ class Handler(BaseHTTPRequestHandler):
                                     f"{GAMES[game]['name']} 得分 {score}/{max_score}，用时 {int(elapsed)}s")
                 add_daily_earned(user["username"], earned, today)
                 log(conn, user["id"], user["username"], "game_end", f"结算 {GAMES[game]['name']}", earned, ip)
+                conn.commit()
             return self._send(200, {"ok": True, "earned": earned, "points": points,
                                     "is_best": is_best, "today_earned": daily_earned(user["username"], today),
                                     "ticket": config_get("goldminer_ticket", GOLDMINER_TICKET) if game == "goldminer" else 0,
@@ -2865,8 +2920,8 @@ class Handler(BaseHTTPRequestHandler):
                              (user["id"], row["crop"]))
                 conn.execute("DELETE FROM farm WHERE user_id=? AND slot=?", (user["id"], slot))
                 conn.execute("UPDATE users SET exp=exp+5 WHERE id=?", (user["id"],))   # 收获经验
-                conn.commit()
                 log(conn, user["id"], user["username"], "farm_harvest", f"收获{CROPS[row['crop']]['name']}入仓", ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True,
                                     "farm": farm_state(conn, user["id"], user["id"], user["username"])})
 
@@ -2986,9 +3041,9 @@ class Handler(BaseHTTPRequestHandler):
             open_flag = 1 if data.get("open") else 0
             with _lock, db() as conn:
                 conn.execute("UPDATE users SET steal_open=? WHERE id=?", (open_flag, user["id"]))
-                conn.commit()
                 log(conn, user["id"], user["username"], "steal_toggle",
                     "开启偷菜" if open_flag else "关闭偷菜", ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True, "steal_open": bool(open_flag)})
 
         if path == "/api/farm/steal-random":
@@ -3144,8 +3199,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "收件人不存在"})
                 conn.execute("INSERT INTO mail(from_id,to_id,title,content,mtype,created_at) VALUES(?,?,?,?,?,?)",
                              (user["id"], target["id"], title, content, "user", time.time()))
-                conn.commit()
                 log(conn, user["id"], user["username"], "mail_send", f"发信给 {to}", ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True})
 
         if path == "/api/mail/read":
@@ -3223,13 +3278,13 @@ class Handler(BaseHTTPRequestHandler):
                     pending = min(row["pending"] * 2, SLOT_PENDING_MAX, max(0, remain))
                     conn.execute("UPDATE slot_pending SET pending=?, created_at=? WHERE token=?",
                                  (pending, time.time(), token))
-                    conn.commit()
                     log(conn, user["id"], user["username"], "slot_double", f"翻倍成功 → {pending}", ip=ip)
+                    conn.commit()
                     return self._send(200, {"ok": True, "win": True, "pending": pending,
                                             "token": token, "points": user["points"]})
                 conn.execute("DELETE FROM slot_pending WHERE token=?", (token,))
-                conn.commit()
                 log(conn, user["id"], user["username"], "slot_double", f"翻倍失败，{row['pending']} 分打了水漂", ip=ip)
+                conn.commit()
                 return self._send(200, {"ok": True, "win": False, "pending": 0,
                                         "token": "", "points": user["points"]})
 
@@ -3265,8 +3320,8 @@ class Handler(BaseHTTPRequestHandler):
                               now if mode == "bot" else None, ip))
                 if mode == "bot":
                     conn.execute("UPDATE gomoku_rooms SET player_white=? WHERE code=?", (0, code))
-                conn.commit()
                 log(conn, user["id"], user["username"], "gomoku_create", f"创建房间 {code} ({mode})", ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True, "code": code, "mode": mode})
 
         if path == "/api/gomoku/join":
@@ -3287,8 +3342,8 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute(
                     "UPDATE gomoku_rooms SET player_white=?, status='playing', last_move_at=?, started_at=?, ip_white=? WHERE code=?",
                     (user["id"], time.time(), time.time(), ip, code))
-                conn.commit()
                 log(conn, user["id"], user["username"], "gomoku_join", f"加入房间 {code}", ip=ip)
+                conn.commit()
             _broadcast(code, None)
             return self._send(200, {"ok": True})
 
@@ -3330,14 +3385,14 @@ class Handler(BaseHTTPRequestHandler):
                                  (json.dumps(board), code))
                     _finish_gomoku(conn, code, user["id"] if won else None,
                                    "normal" if won else "draw", ip)
-                    conn.commit()
                     log(conn, user["id"], user["username"], "gomoku_move", f"房间{code}落子({x},{y})", ip=ip)
+                    conn.commit()
                     _broadcast(code, None)
                     return self._send(200, {"ok": True, "over": True, "winner": user["id"] if won else None})
                 conn.execute("UPDATE gomoku_rooms SET board=?, turn=?, last_move_at=?, moves=moves+1 WHERE code=?",
                              (json.dumps(board), 3 - color, time.time(), code))
-                conn.commit()
                 log(conn, user["id"], user["username"], "gomoku_move", f"房间{code}落子({x},{y})", ip=ip)
+                conn.commit()
             _broadcast(code, None)
             if row["mode"] == "bot" and not won and not full:
                 threading.Thread(target=_gomoku_bot_turn, args=(code,), daemon=True).start()
@@ -3358,8 +3413,8 @@ class Handler(BaseHTTPRequestHandler):
                     if row["player_black"] != uid:
                         return self._send(403, {"error": "只有房主可以取消房间"})
                     conn.execute("DELETE FROM gomoku_rooms WHERE code=?", (code,))
-                    conn.commit()
                     log(conn, uid, user["username"], "gomoku_cancel", f"取消房间 {code}", ip=ip)
+                    conn.commit()
                     _broadcast(code, None)
                     return self._send(200, {"ok": True})
                 if row["status"] == "playing":
@@ -3368,8 +3423,8 @@ class Handler(BaseHTTPRequestHandler):
                     opp = row["player_white"] if uid == row["player_black"] else row["player_black"]
                     # 认输：胜方=对手，结束原因 resign，奖励与状态在同一事务内结算
                     _finish_gomoku(conn, code, opp, "resign", ip, loser=uid)
-                    conn.commit()
                     log(conn, uid, user["username"], "gomoku_leave", f"房间{code}认输", ip=ip)
+                    conn.commit()
             _broadcast(code, None)
             return self._send(200, {"ok": True})
 
@@ -3398,6 +3453,7 @@ class Handler(BaseHTTPRequestHandler):
                             before_value=str(before), after_value=str(points),
                             reason=note or None, request_id=request_id, ip=ip)
                 log(conn, user["id"], user["username"], "admin_op", f"给 {target['username']} 调整余额", amount, ip)
+                conn.commit()
             return self._send(200, {"ok": True, "points": points})
 
         if path == "/api/admin/toggle-status":
@@ -3426,9 +3482,9 @@ class Handler(BaseHTTPRequestHandler):
                             target=target["username"],
                             before_value=before, after_value=new,
                             reason=reason, request_id=request_id, ip=ip)
-                conn.commit()
                 detail = f"封禁/解封 {target['username']} → {new}，理由：{reason}"
                 log(conn, user["id"], user["username"], "admin_op", detail, ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True, "status": new})
 
         if path == "/api/admin/kick-session":
@@ -3451,9 +3507,9 @@ class Handler(BaseHTTPRequestHandler):
                 admin_audit(conn, user["id"], user["username"], "kick_session",
                             target=target["username"], after_value=f"注销{kicked}个会话",
                             reason=None, request_id=request_id, ip=ip)
-                conn.commit()
                 log(conn, user["id"], user["username"], "admin_op",
                     f"强制下线 {target['username']}(注销 {kicked} 个会话)", ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True, "kicked": kicked})
 
         if path == "/api/admin/mail":
@@ -3471,8 +3527,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "用户不存在"})
                 conn.execute("INSERT INTO mail(from_id,to_id,title,content,mtype,created_at) VALUES(?,?,?,?,?,?)",
                              (user["id"], target["id"], title, content, "system", time.time()))
-                conn.commit()
                 log(conn, user["id"], user["username"], "admin_mail", f"系统信件给 {to}", ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True})
 
         if path == "/api/admin/del-bottle":
@@ -3494,8 +3550,8 @@ class Handler(BaseHTTPRequestHandler):
                                 before_value=(row["content"] or "")[:200],
                                 reason=reason, request_id=request_id, ip=ip)
                 conn.execute("DELETE FROM bottles WHERE id=?", (bid,))
-                conn.commit()
                 log(conn, user["id"], user["username"], "admin_op", f"删除漂流瓶 #{bid}，理由：{reason}", ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True})
 
         # ============ Issue #23:用户举报(漂流瓶 / 站内信) ============
@@ -3527,8 +3583,8 @@ class Handler(BaseHTTPRequestHandler):
                     "INSERT INTO reports(content_type,content_id,reporter_id,reason,status,created_at) "
                     "VALUES(?,?,?,?,?,?)",
                     (ctype, cid, user["id"], reason, "pending", time.time()))
-                conn.commit()
                 log(conn, user["id"], user["username"], "report", f"举报{ctype}#{cid}：{reason}", ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True})
 
         # ============ Issue #22:风险事件处理 ============
@@ -3544,7 +3600,6 @@ class Handler(BaseHTTPRequestHandler):
             with _lock, db() as conn:
                 cur = conn.execute("UPDATE risk_events SET status='reviewed', note=? WHERE id=?",
                                    (note or None, rid))
-                conn.commit()
                 if cur.rowcount == 0:
                     return self._send(404, {"error": "风险事件不存在"})
                 admin_audit(conn, user["id"], user["username"], "risk_review",
@@ -3552,6 +3607,7 @@ class Handler(BaseHTTPRequestHandler):
                             after_value="reviewed", reason=note or None,
                             request_id=request_id, ip=ip)
                 log(conn, user["id"], user["username"], "admin_op", f"风险事件 #{rid} 已复核", ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True})
 
         # ============ Issue #23:举报处理(hide / reject / warn) ============
@@ -3601,9 +3657,9 @@ class Handler(BaseHTTPRequestHandler):
                             target=f"report#{rid}", before_value="pending",
                             after_value=status, reason=note or None,
                             request_id=request_id, ip=ip)
-                conn.commit()
                 log(conn, user["id"], user["username"], "admin_op",
                     f"处理举报 #{rid}（{action}）", ip=ip)
+                conn.commit()
             return self._send(200, {"ok": True})
 
         # ============ Issue #21:游戏参数配置(draft/publish/rollback) ============
@@ -3618,6 +3674,7 @@ class Handler(BaseHTTPRequestHandler):
                     ver = config_set(conn, name, value, user["username"])
                     log(conn, user["id"], user["username"], "config_set",
                         f"修改参数 {name} → {value}（草稿 v{ver}）", ip=ip)
+                    conn.commit()
             except ValueError as e:
                 return self._send(400, {"error": str(e)})
             return self._send(200, {"ok": True, "name": name, "version": ver})
@@ -3635,6 +3692,7 @@ class Handler(BaseHTTPRequestHandler):
                                 request_id=request_id, ip=ip)
                     log(conn, user["id"], user["username"], "config_publish",
                         f"发布参数 {name}（v{ver}）", ip=ip)
+                    conn.commit()
             except ValueError as e:
                 return self._send(400, {"error": str(e)})
             return self._send(200, {"ok": True, "name": name, "version": ver})
@@ -3652,6 +3710,7 @@ class Handler(BaseHTTPRequestHandler):
                                 request_id=request_id, ip=ip)
                     log(conn, user["id"], user["username"], "config_rollback",
                         f"回滚参数 {name} → {res['value']}（v{res['version']}）", ip=ip)
+                    conn.commit()
             except ValueError as e:
                 return self._send(400, {"error": str(e)})
             return self._send(200, {"ok": True, "name": name, **res})
@@ -3676,8 +3735,8 @@ def ensure_admins():
                 admin_audit(conn, u["id"], n, "role_change", target=n,
                             before_value=u["role"], after_value="admin",
                             reason="预设管理员名单提升", request_id="startup")
-                conn.commit()
                 log(conn, u["id"], n, "admin_op", "预设管理员提升")
+                conn.commit()
 
 
 def main():

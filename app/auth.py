@@ -198,6 +198,7 @@ async def register(request: Request):
         uid = cur.lastrowid
         token = new_session(conn, uid, ip)
         log(conn, uid, username, "register", "新用户注册", ip=ip)
+        conn.commit()
     resp = json_response(200, {"ok": True, "token": token, "user": {
         "id": uid, "username": username, "points": config.WELCOME_POINTS, "role": role},
         "msg": f"注册成功，赠送 {config.WELCOME_POINTS} 积分！"})
@@ -223,8 +224,8 @@ async def login(request: Request):
             return json_response(403, {"error": "账号已被封禁"})
         token = new_session(conn, row["id"], ip)
         conn.execute("UPDATE users SET last_login=? WHERE id=?", (time.time(), row["id"]))
-        conn.commit()
         log(conn, row["id"], username, "login", "登录成功", ip=ip)
+        conn.commit()
     resp = json_response(200, {"ok": True, "token": token, "user": {
         "id": row["id"], "username": username, "points": row["points"], "role": row["role"]}})
     set_session_cookie(resp, token)
@@ -241,9 +242,9 @@ async def logout(request: Request):
         row = conn.execute("SELECT * FROM sessions WHERE token=?", (token,)).fetchone()
         if row:
             conn.execute("DELETE FROM sessions WHERE token=?", (token,))
-            conn.commit()
             u = conn.execute("SELECT * FROM users WHERE id=?", (row["user_id"],)).fetchone()
             log(conn, row["user_id"], u["username"] if u else "?", "logout", "退出登录", ip=ip)
+            conn.commit()
     resp = json_response(200, {"ok": True})
     clear_session_cookie(resp)
     return resp
