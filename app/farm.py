@@ -549,8 +549,8 @@ async def farm_harvest(request: Request):
                      (user["id"], row["crop"]))
         conn.execute("DELETE FROM farm WHERE user_id=? AND slot=?", (user["id"], slot))
         conn.execute("UPDATE users SET exp=exp+5 WHERE id=?", (user["id"],))   # 收获经验
-        conn.commit()
         log(conn, user["id"], user["username"], "farm_harvest", f"收获{CROPS[row['crop']]['name']}入仓", ip=ip)
+        conn.commit()
     return json_response(200, {"ok": True,
                                "farm": farm_state(conn, user["id"], user["id"], user["username"])})
 
@@ -702,9 +702,9 @@ async def farm_steal_toggle(request: Request):
     open_flag = 1 if data.get("open") else 0
     with _lock, db() as conn:
         conn.execute("UPDATE users SET steal_open=? WHERE id=?", (open_flag, user["id"]))
-        conn.commit()
         log(conn, user["id"], user["username"], "steal_toggle",
             "开启偷菜" if open_flag else "关闭偷菜", ip=ip)
+        conn.commit()
     return json_response(200, {"ok": True, "steal_open": bool(open_flag)})
 
 

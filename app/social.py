@@ -56,8 +56,8 @@ def bottle_pick_get(request: Request):
             return json_response(200, {"bottle": None})
         conn.execute("UPDATE bottles SET picked=1, picked_by=?, views=views+1 WHERE id=?",
                      (user["username"], row["id"]))
-        conn.commit()
         log(conn, user["id"], user["username"], "bottle_pick", f"捡起第{row['id']}号漂流瓶")
+        conn.commit()
         return json_response(200, {"bottle": dict(row)})
 
 
@@ -81,8 +81,8 @@ async def mail_send(request: Request):
             return json_response(400, {"error": "收件人不存在"})
         conn.execute("INSERT INTO mail(from_id,to_id,title,content,mtype,created_at) VALUES(?,?,?,?,?,?)",
                      (user["id"], target["id"], title, content, "user", time.time()))
-        conn.commit()
         log(conn, user["id"], user["username"], "mail_send", f"发信给 {to}", ip=ip)
+        conn.commit()
     return json_response(200, {"ok": True})
 
 

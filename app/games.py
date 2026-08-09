@@ -38,6 +38,11 @@ GAMES = {
 GAME_SESSION_MINUTES = 30
 RHYTHM_BPM = 132
 RHYTHM_SONG_SEC = 80
+# Issue #47:音乐游戏结算真实时长校验参数(防回传谱面刷满分)
+RHYTHM_COVERAGE_MIN = 0.7      # 时间线覆盖时长(末键-首键) / 谱面时长 下限
+RHYTHM_DENSITY_TOL = 4         # 同 1 秒内按键数容差:谱面同秒音符数 + 该容差
+RHYTHM_ELAPSED_TOL = 15        # 时间线末键相对服务器真实经过时长的容差(秒,防立即回传)
+RHYTHM_END_TOLERANCE = 20      # 时间线末键到达谱面结尾的容差(秒,容错暂停/延迟/早退)
 
 # 黄金矿工门票与经济
 GOLDMINER_DAILY_LIMIT = 10
@@ -234,7 +239,9 @@ def _gm_mulberry32(a):
 
 
 def gen_goldminer_world(seed):
-    """复刻前端 genWorld:固定 seed 生成 26 个矿(位置+类型+分值)"""
+    """复刻前端 genWorld:固定 seed 生成 26 个矿(位置+类型+分值+稳定物品 ID)。
+    Issue #48:每个矿按生成序分配稳定 id(=下标),服务端与前端按同一 RNG 序列
+    (前端已移除 spin 对种子 RNG 的额外消耗)生成顺序一致,结算按 id 校验抓取轨迹。"""
     rnd = _gm_mulberry32(seed & 0xFFFFFFFF)
     items = []
     guard = 0
@@ -253,7 +260,7 @@ def gen_goldminer_world(seed):
         r = chosen["r"]
         if any(((o["x"] - x) ** 2 + (o["y"] - y) ** 2) ** 0.5 < o["r"] + r + 6 for o in items):
             continue
-        items.append({**chosen, "x": x, "y": y})
+        items.append({**chosen, "id": len(items), "x": x, "y": y})
     return items
 
 
@@ -812,8 +819,8 @@ async def game_start(request: Request):
                      (token, user["id"], game, seed,
                       json.dumps(chart) if chart else None, max_score,
                       time.time(), time.time() + GAME_SESSION_MINUTES * 60))
-        conn.commit()
         log(conn, user["id"], user["username"], "game_start", f"开始游戏 {game}", ip=ip)
+        conn.commit()
     return json_response(200, {"ok": True, "token": token, "game": game,
                                "chart": chart, "max_score": max_score,
                                "goldminer_seed": seed if game == "goldminer" else None,
@@ -843,9 +850,10 @@ async def game_end(request: Request):
     if game not in GAMES:
         return json_response(400, {"error": "未知游戏"})
     today = time.strftime("%Y-%m-%d")
-    if not rate_check(f"gend:{user['username']}:{game}", config.SUBMIT_PER_HOUR, 3600):
+    # Issue #46:小时/每日限流使用独立持久化桶(避免共用 key 不同 window 互相覆盖)
+    if not rate_check(f"gend_h:{user['username']}:{game}", config.SUBMIT_PER_HOUR, 3600):
         return json_response(429, {"error": "本小时提交次数已达上限"})
-    if not rate_check(f"gend:{user['username']}:{game}", config.SUBMIT_PER_DAY, 86400):
+    if not rate_check(f"gend_d:{user['username']}:{game}", config.SUBMIT_PER_DAY, 86400):
         return json_response(429, {"error": "今日提交次数已达上限"})
     if not rate_check(f"gendip:{ip}", 30, 3600):
         return json_response(429, {"error": "提交过于频繁"})
@@ -876,30 +884,64 @@ async def game_end(request: Request):
                     return json_response(400, {"error": "按键数据异常，提交被拒绝"})
                 if 0 <= t <= 85 and 0 <= lane < 8:
                     tl.append({"t": t, "lane": lane})
+            # Issue #47:校验时间线是否具备真实游玩时长特征(防把谱面原样转时间线刷满分)
+            if not tl:
+                return json_response(400, {"error": "对局时长异常"})
+            chart_times = sorted(n["t"] for n in chart)
+            chart_last = chart_times[-1]
+            chart_span = max(chart_last - chart_times[0], 1)
+            tl_ts = sorted(k["t"] for k in tl)
+            tl_first, tl_last = tl_ts[0], tl_ts[-1]
+            elapsed = time.time() - sess["created_at"]   # 开局已记录真实开始时间
+            if tl_last > elapsed + RHYTHM_ELAPSED_TOL:
+                return json_response(400, {"error": "对局时长异常"})
+            if tl_last < chart_last - RHYTHM_END_TOLERANCE:
+                return json_response(400, {"error": "对局时长异常"})
+            if tl_last - tl_first < RHYTHM_COVERAGE_MIN * chart_span:
+                return json_response(400, {"error": "对局时长异常"})
+            chart_sec = {}
+            for n in chart:
+                chart_sec[int(n["t"])] = chart_sec.get(int(n["t"]), 0) + 1
+            tl_sec = {}
+            for k in tl:
+                tl_sec[int(k["t"])] = tl_sec.get(int(k["t"]), 0) + 1
+            for sec, cnt in tl_sec.items():
+                if cnt > chart_sec.get(sec, 0) + RHYTHM_DENSITY_TOL:
+                    return json_response(400, {"error": "对局时长异常"})
             p, g, m, server_score = judge_rhythm(chart, tl)
             if p + g + m != len(chart):
                 pass  # 允许早退(未按键的音符记 miss 已在重判内)
             score = min(server_score, max_score)
         earned = min(score, max_score)
         if game == "goldminer":
-            # 服务器用 seed 重算地图,校验抓取轨迹(防伪造分数)
+            # Issue #48:服务器用 seed 重算地图(每个矿带稳定物品 ID),按 ID 集合校验抓取轨迹
             catches = stats.get("catches")
             if not isinstance(catches, list) or len(catches) > GOLDMINER_ITEMS:
                 return json_response(400, {"error": "抓取数据异常"})
             world = gen_goldminer_world(sess["seed"])
-            avail = {}
-            for it in world:
-                avail[it["v"]] = avail.get(it["v"], 0) + 1
+            world_by_id = {it["id"]: it for it in world}
             total_v = 0
+            seen = set()
             for c in catches:
-                try:
-                    v = int(c.get("v", -1))
-                except Exception:
+                if not isinstance(c, dict) or "id" not in c:
+                    # 兼容性:旧格式(无 id)拒绝
                     return json_response(400, {"error": "抓取数据异常"})
-                if avail.get(v, 0) <= 0:
+                try:
+                    cid = int(c["id"])
+                except (TypeError, ValueError):
+                    return json_response(400, {"error": "抓取数据异常"})
+                if cid in seen or cid not in world_by_id:
                     return json_response(400, {"error": "抓取数据与地图不符"})
-                avail[v] -= 1
-                total_v += v
+                seen.add(cid)
+                it = world_by_id[cid]
+                if "v" in c:
+                    try:
+                        v = int(c["v"])
+                    except (TypeError, ValueError):
+                        return json_response(400, {"error": "抓取数据异常"})
+                    if v != it["v"]:
+                        return json_response(400, {"error": "抓取数据与地图不符"})
+                total_v += it["v"]
             if score != total_v:
                 return json_response(400, {"error": "分数与抓取记录不符"})
             earned = random.randint(config_get("goldminer_pay_min", GOLDMINER_PAY_MIN),
@@ -922,6 +964,7 @@ async def game_end(request: Request):
             conn.commit()
         add_daily_earned(user["username"], earned, today)
         log(conn, user["id"], user["username"], "game_end", f"结算 {GAMES[game]['name']}", earned, ip)
+        conn.commit()
     return json_response(200, {"ok": True, "earned": earned, "points": points,
                                "is_best": is_best, "today_earned": daily_earned(user["username"], today),
                                "ticket": config_get("goldminer_ticket", GOLDMINER_TICKET) if game == "goldminer" else 0,
@@ -1053,13 +1096,13 @@ async def slot_double(request: Request):
             pending = min(row["pending"] * 2, SLOT_PENDING_MAX, max(0, remain))
             conn.execute("UPDATE slot_pending SET pending=?, created_at=? WHERE token=?",
                          (pending, time.time(), token))
-            conn.commit()
             log(conn, user["id"], user["username"], "slot_double", f"翻倍成功 → {pending}", ip=ip)
+            conn.commit()
             return json_response(200, {"ok": True, "win": True, "pending": pending,
                                        "token": token, "points": user["points"]})
         conn.execute("DELETE FROM slot_pending WHERE token=?", (token,))
-        conn.commit()
         log(conn, user["id"], user["username"], "slot_double", f"翻倍失败，{row['pending']} 分打了水漂", ip=ip)
+        conn.commit()
         return json_response(200, {"ok": True, "win": False, "pending": 0,
                                    "token": "", "points": user["points"]})
 
@@ -1176,8 +1219,8 @@ async def gomoku_create(request: Request):
                       now if mode == "bot" else None, ip))
         if mode == "bot":
             conn.execute("UPDATE gomoku_rooms SET player_white=? WHERE code=?", (0, code))
-        conn.commit()
         log(conn, user["id"], user["username"], "gomoku_create", f"创建房间 {code} ({mode})", ip=ip)
+        conn.commit()
     return json_response(200, {"ok": True, "code": code, "mode": mode})
 
 
@@ -1204,8 +1247,8 @@ async def gomoku_join(request: Request):
         conn.execute(
             "UPDATE gomoku_rooms SET player_white=?, status='playing', last_move_at=?, started_at=?, ip_white=? WHERE code=?",
             (user["id"], time.time(), time.time(), ip, code))
-        conn.commit()
         log(conn, user["id"], user["username"], "gomoku_join", f"加入房间 {code}", ip=ip)
+        conn.commit()
     _broadcast(code, None)
     return json_response(200, {"ok": True})
 
@@ -1253,14 +1296,14 @@ async def gomoku_move(request: Request):
                          (json.dumps(board), code))
             _finish_gomoku(conn, code, user["id"] if won else None,
                            "normal" if won else "draw", ip)
-            conn.commit()
             log(conn, user["id"], user["username"], "gomoku_move", f"房间{code}落子({x},{y})", ip=ip)
+            conn.commit()
             _broadcast(code, None)
             return json_response(200, {"ok": True, "over": True, "winner": user["id"] if won else None})
         conn.execute("UPDATE gomoku_rooms SET board=?, turn=?, last_move_at=?, moves=moves+1 WHERE code=?",
                      (json.dumps(board), 3 - color, time.time(), code))
-        conn.commit()
         log(conn, user["id"], user["username"], "gomoku_move", f"房间{code}落子({x},{y})", ip=ip)
+        conn.commit()
     _broadcast(code, None)
     if row["mode"] == "bot" and not won and not full:
         threading.Thread(target=_gomoku_bot_turn, args=(code,), daemon=True).start()
@@ -1287,8 +1330,8 @@ async def gomoku_leave(request: Request):
             if row["player_black"] != uid:
                 return json_response(403, {"error": "只有房主可以取消房间"})
             conn.execute("DELETE FROM gomoku_rooms WHERE code=?", (code,))
-            conn.commit()
             log(conn, uid, user["username"], "gomoku_cancel", f"取消房间 {code}", ip=ip)
+            conn.commit()
             _broadcast(code, None)
             return json_response(200, {"ok": True})
         if row["status"] == "playing":
@@ -1297,7 +1340,7 @@ async def gomoku_leave(request: Request):
             opp = row["player_white"] if uid == row["player_black"] else row["player_black"]
             # 认输：胜方=对手，结束原因 resign，奖励与状态在同一事务内结算
             _finish_gomoku(conn, code, opp, "resign", ip, loser=uid)
-            conn.commit()
             log(conn, uid, user["username"], "gomoku_leave", f"房间{code}认输", ip=ip)
+            conn.commit()
     _broadcast(code, None)
     return json_response(200, {"ok": True})

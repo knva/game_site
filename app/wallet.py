@@ -17,9 +17,10 @@ router = APIRouter()
 
 # ---------------- 日志 ----------------
 def log(conn, user_id, username, action, detail="", amount=None, ip=""):
+    """写入审计日志。Issue #49:不再内部 commit,与调用方其余 SQL 同事务,
+    由调用方显式 commit 或外层 `with db() as conn:` 块退出时统一提交(保证原子性)。"""
     conn.execute("INSERT INTO logs(user_id,username,action,detail,amount,ip,at) VALUES(?,?,?,?,?,?,?)",
                  (user_id, username, action, detail, amount, ip, time.time()))
-    conn.commit()
 
 
 # ---------------- 频率限制(持久化存储,重启不清零,多实例共享) ----------------
@@ -47,11 +48,13 @@ def rate_check(key, limit, window, now=None):
 
 
 def daily_earned(name, today):
-    """今日已赚积分:从 logs 聚合(game_award/farm_harvest),持久化可靠"""
+    """今日已赚积分:按用户聚合 point_ledger 当日正向流水(amount>0)。
+    Issue #45:不再依赖 logs 的 action 白名单(会遗漏 farm_sell/slot_win/wheel_spin/
+    admin_balance/checkin 等正向收益),point_ledger 为权威流水,与 #2 一致。"""
     with _lock, db() as conn:
         day_start = time.mktime(time.strptime(today, "%Y-%m-%d"))
-        row = conn.execute("SELECT COALESCE(SUM(amount),0) s FROM logs "
-                           "WHERE username=? AND action IN ('game_award','farm_harvest') AND at>=?",
+        row = conn.execute("SELECT COALESCE(SUM(amount),0) s FROM point_ledger "
+                           "WHERE username=? AND amount>0 AND created_at>=?",
                            (name, day_start)).fetchone()
         return row["s"]
 
@@ -88,12 +91,15 @@ def _rate_peek(key, window):
 # ---------------- 用户余额（所有变动都走这里 + 不可变流水 + 日志） ----------------
 def change_points(conn, user_id, username, amount, action, detail="", ip="", idem_key=None):
     """统一积分变动入口:更新余额 + 写 point_ledger 不可变流水 + 写日志。
-    idem_key 非空时幂等:同一业务单号只生效一次(防重复发奖/扣款)。"""
+    idem_key 非空时幂等:同一业务单号只生效一次(防重复发奖/扣款)。
+
+    Issue #49:本函数内部不做提交(原 log() 内部 conn.commit 已移除),「余额+流水+日志」
+    与调用方其余 SQL 同属一个事务,由调用方显式 commit 或外层 `with db() as conn:`
+    退出时统一提交——整体成功则一次提交,后续任一步失败 rollback 时全部回滚。"""
     with _lock:
         if idem_key:
             exists = conn.execute("SELECT 1 FROM point_ledger WHERE biz_no=?", (idem_key,)).fetchone()
             if exists:
-                conn.commit()
                 return conn.execute("SELECT points FROM users WHERE id=?", (user_id,)).fetchone()["points"]
         if amount < 0:
             cur = conn.execute("UPDATE users SET points = points + ? WHERE id=? AND points + ? >= 0",
