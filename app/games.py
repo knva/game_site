@@ -20,10 +20,11 @@ from fastapi import APIRouter, Request, Response
 from starlette.responses import StreamingResponse
 
 from . import config
+from .admin import _add_risk_event
 from .auth import me
 from .db import _lock, db
 from .farm import CROPS
-from .gameconfig import config_get
+from .gameconfig import config_get, config_version
 from .http import json_response, parse_body
 from .wallet import (add_daily_earned, add_slot_daily_earned, change_points, daily_earned,
                      log, rate_check, slot_daily_earned)
@@ -130,16 +131,32 @@ def _slot_expected_var():
 
 
 def _wheel_expected_prize():
-    """转盘每次期望产出:Σ(prize×weight)/Σweight("再转一次"按 prize=-1 计,期望值仍准确)"""
+    """转盘每次期望产出(修正版,Issue #54):
+    把"再转一次"免费券形成的递归免费转纳入期望计算。p_free = 免费扇区权重占比,
+    每次付费转动:以 1-p_free 直接产出 E0,以 p_free 获得一次价值同为 E 的免费转:
+    E = E0 + p_free·E → E = E0/(1-p_free)(等价 p_extra = p_free/(1-p_free))。
+    免费扇区自身 prize 记 0(不再用 -1 当作真实产出)。"""
     total = sum(WHEEL_WEIGHTS)
-    return round(sum(WHEEL_SECTORS[i]["prize"] * WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))) / total, 2)
+    p_free = sum(WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))
+                 if WHEEL_SECTORS[i]["prize"] == -1) / total
+    e0 = sum(WHEEL_SECTORS[i]["prize"] * WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))
+             if WHEEL_SECTORS[i]["prize"] != -1) / total
+    if p_free >= 1:
+        return round(e0, 2)
+    return round(e0 / (1 - p_free), 2)
 
 
 def _wheel_expected_var():
-    """转盘期望产出方差"""
+    """转盘期望产出方差(修正版,Issue #54):
+    X = X0 + B·X(B=1 表示中"再转一次"、X0=0),E[X²] = E[X0²] + p_free·E[X²]
+    → E[X²] = E[X0²]/(1-p_free);Var = E[X²] - E[X]²。"""
     total = sum(WHEEL_WEIGHTS)
+    p_free = sum(WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))
+                 if WHEEL_SECTORS[i]["prize"] == -1) / total
     e = _wheel_expected_prize()
-    e2 = sum(WHEEL_SECTORS[i]["prize"] ** 2 * WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))) / total
+    e0_2 = sum(WHEEL_SECTORS[i]["prize"] ** 2 * WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))
+               if WHEEL_SECTORS[i]["prize"] != -1) / total
+    e2 = e0_2 / (1 - p_free) if p_free < 1 else e0_2
     return round(e2 - e * e, 1)
 
 
@@ -189,7 +206,22 @@ GAME_ECONOMY = {
 
 
 def game_odds():
-    """公开收益模型(/api/game/odds):各玩法门票/期望/方差/返奖率 + 农场作物收益-时长比。"""
+    """公开收益模型(/api/game/odds):各玩法门票/期望/方差/返奖率 + 农场作物收益-时长比。
+
+    Issue #54:不再使用导入时硬编码的 GAME_ECONOMY,每次请求动态读取已发布配置
+    (config_get,带 TTL/版本号缓存)计算门票/期望/上限,并附带当前已发布配置版本号。
+    """
+    gm_ticket = config_get("goldminer_ticket", GOLDMINER_TICKET)
+    gm_min = config_get("goldminer_pay_min", GOLDMINER_PAY_MIN)
+    gm_max = config_get("goldminer_pay_max", GOLDMINER_PAY_MAX)
+    slot_ticket = config_get("slot_cost", SLOT_COST)
+    wheel_ticket = config_get("wheel_cost", WHEEL_COST)
+    slot_exp = _slot_expected_payout()
+    wheel_exp = _wheel_expected_prize()
+    wheel_var = _wheel_expected_var()
+    gm_exp = round((gm_min + gm_max) / 2, 1)
+    gm_var = round(((gm_max - gm_min + 1) ** 2 - 1) / 12, 1)
+
     farm_crops = {}
     for c, info in CROPS.items():
         net = info["sell"] - info["cost"]
@@ -206,10 +238,44 @@ def game_odds():
         return round(sum(farm_crops[k]["profit_per_min"] for k in keys) / len(keys), 2) if keys else None
 
     return {
-        "goldminer": {"name": "黄金矿工", **GAME_ECONOMY["goldminer"]},
-        "slot": {"name": "水果老虎机", **GAME_ECONOMY["slot"]},
-        "wheel": {"name": "幸运大转盘", **GAME_ECONOMY["wheel"]},
-        "rhythm": {"name": "音乐游戏", **GAME_ECONOMY["rhythm"]},
+        "config_version": config_version(),
+        "goldminer": {
+            "name": "黄金矿工",
+            "ticket": gm_ticket,
+            "pay_range": [gm_min, gm_max],
+            "expected": gm_exp,
+            "variance": gm_var,
+            "daily_limit": GOLDMINER_DAILY_LIMIT,
+            "rtp": round(gm_exp / gm_ticket, 3) if gm_ticket else None,
+        },
+        "slot": {
+            "name": "水果老虎机",
+            "ticket": slot_ticket,
+            "pay_range": [0, max(SLOT_SYMBOLS[s]["x3"] for s in SLOT_SYMBOLS)],
+            "expected": slot_exp,
+            "variance": _slot_expected_var(),
+            "daily_limit": SLOT_DAILY_MAX,
+            "rtp": round(slot_exp / slot_ticket, 3) if slot_ticket else None,
+        },
+        "wheel": {
+            "name": "幸运大转盘",
+            "ticket": wheel_ticket,
+            "pay_range": [min(s["prize"] for s in WHEEL_SECTORS), max(s["prize"] for s in WHEEL_SECTORS)],
+            "expected": wheel_exp,
+            "variance": wheel_var,
+            "daily_limit": None,   # 无独立日上限,受频率限制与全局每日可赚上限约束
+            "rtp": round(wheel_exp / wheel_ticket, 3) if wheel_ticket else None,
+        },
+        "rhythm": {
+            "name": "音乐游戏",
+            "ticket": 0,
+            "pay_range": [0, None],
+            "expected": None,
+            "expected_range": [3000, 6000],
+            "variance": None,
+            "daily_limit": config.SUBMIT_PER_DAY,
+            "rtp": None,
+        },
         "farm": {
             "crops": farm_crops,
             "compare": {
@@ -520,6 +586,18 @@ def _finish_gomoku(conn, code, winner, reason, ip="", loser=None):
         loser = pb
     moves = row["moves"] or sum(1 for c in (json.loads(row["board"]) or []) if c)
     risks, mult = _gomoku_risk_check(conn, row, moves)
+    # Issue #22:命中风控(同 IP / 重复对手)写入风险事件,双方玩家各记一条
+    risk_rule_map = {"same_ip": ("gomoku_same_ip", "high", "对局双方同 IP"),
+                     "repeat_opponent": ("gomoku_repeat", "medium", "窗口内重复对手")}
+    for risk_name in risks:
+        if risk_name in risk_rule_map:
+            rule, level, label = risk_rule_map[risk_name]
+            for uid in (pb, pw):
+                if uid and uid != 0:
+                    u = conn.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
+                    if u:
+                        _add_risk_event(conn, uid, u["username"], rule, level,
+                                        f"房间{code} {label}（{result}）")
     conn.execute(
         "INSERT INTO gomoku_games(code,player_black,player_white,winner,loser,result,reason,moves,risk,at,ended_at) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -852,6 +930,10 @@ async def game_end(request: Request):
     today = time.strftime("%Y-%m-%d")
     # Issue #46:小时/每日限流使用独立持久化桶(避免共用 key 不同 window 互相覆盖)
     if not rate_check(f"gend_h:{user['username']}:{game}", config.SUBMIT_PER_HOUR, 3600):
+        # Issue #22:单小时提交结算次数超限 → 风险事件
+        with _lock, db() as conn:
+            _add_risk_event(conn, user["id"], user["username"], "submit_burst", "medium",
+                            f"{GAMES[game]['name']} 单小时提交结算超限")
         return json_response(429, {"error": "本小时提交次数已达上限"})
     if not rate_check(f"gend_d:{user['username']}:{game}", config.SUBMIT_PER_DAY, 86400):
         return json_response(429, {"error": "今日提交次数已达上限"})
@@ -962,6 +1044,11 @@ async def game_end(request: Request):
             conn.execute("INSERT OR REPLACE INTO scores(game,user_id,name,score,at) VALUES(?,?,?,?,?)",
                          (game, user["id"], user["username"], score, time.time()))
             conn.commit()
+        # Issue #22:接近满分且用时过短 → 风险事件(疑似外挂/超快满分结算)
+        elapsed = time.time() - sess["created_at"]
+        if score > max_score * 0.98 and elapsed < GAMES[game]["duration"] * 0.5:
+            _add_risk_event(conn, user["id"], user["username"], "perfect_too_fast", "high",
+                            f"{GAMES[game]['name']} 得分 {score}/{max_score}，用时 {int(elapsed)}s")
         add_daily_earned(user["username"], earned, today)
         log(conn, user["id"], user["username"], "game_end", f"结算 {GAMES[game]['name']}", earned, ip)
         conn.commit()

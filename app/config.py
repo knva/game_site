@@ -16,6 +16,8 @@ ADMIN_INIT = [u.strip() for u in os.environ.get("ADMIN_INIT", "").split(",") if 
 
 SESSION_COOKIE = "gs_session"  # HttpOnly 会话 Cookie(同源请求自动携带)
 LOGIN_SESSION_DAYS = 7
+# Issue #51:生产 https 下会话 Cookie 加 Secure(环境变量 COOKIE_SECURE=1 开启;本地 http 默认不加)
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE") == "1"
 
 WELCOME_POINTS = 100
 
