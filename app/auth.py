@@ -92,12 +92,14 @@ def compute_streak(conn, user_id):
     days = {r["day"] for r in rows}
     streak = 0
     d = date.today()
-    if d.isoformat() in days:
+    checked_today = d.isoformat() in days
+    if checked_today:
         d -= timedelta(days=1)
     while d.isoformat() in days:
         streak += 1
         d -= timedelta(days=1)
-    return streak
+    # Issue #56:今天已签到是连续天数的一部分,回退计数后需 +1 补回
+    return streak + (1 if checked_today else 0)
 
 
 def checkin_reward(streak_day, vip=False):

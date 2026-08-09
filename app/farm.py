@@ -105,19 +105,25 @@ def stamina_state(conn, user_row):
     """返回当前体力并结算在线恢复"""
     now = time.time()
     cur = user_row["stamina"]
-    if user_row["stamina_at"] > 0:
-        gained = int((now - user_row["stamina_at"]) // STAMINA_REGEN_SECONDS)
+    stamp = user_row["stamina_at"] or now
+    if stamp > 0:
+        elapsed = now - stamp
+        gained = int(elapsed // STAMINA_REGEN_SECONDS)
         if gained > 0:
+            # Issue #57:恢复时保留不足一个周期的余量(stamina_at 只推进整数周期,
+            # 例如 599 秒恢复 1 点后余 299 秒计入下次,不丢失未满周期的进度)。
+            carry = elapsed % STAMINA_REGEN_SECONDS
             cur = min(STAMINA_MAX, cur + gained)
+            stamp = (now - carry) if cur < STAMINA_MAX else 0
             conn.execute("UPDATE users SET stamina=?, stamina_at=? WHERE id=?",
-                         (cur, now, user_row["id"]))
+                         (cur, stamp, user_row["id"]))
             conn.commit()
     if cur >= STAMINA_MAX:
         next_in = 0
-        conn.execute("UPDATE users SET stamina_at=0 WHERE id=?", (user_row["id"],))
-        conn.commit()
+        if stamp != 0:
+            conn.execute("UPDATE users SET stamina_at=0 WHERE id=?", (user_row["id"],))
+            conn.commit()
     else:
-        stamp = user_row["stamina_at"] or now
         next_in = STAMINA_REGEN_SECONDS - int((now - stamp) % STAMINA_REGEN_SECONDS)
     return {"current": cur, "max": STAMINA_MAX,
             "next_in": next_in, "steal_cost": STEAL_STAMINA_COST}

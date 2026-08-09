@@ -28,12 +28,24 @@ from . import config
 # 可重入锁:所有数据库操作串行化(与原 server.py 行为一致,迁移期间保持)
 _lock = threading.RLock()
 
-# Issue #17:数据库地址从环境变量读取;PostgreSQL 未适配时打印提示并降级 SQLite。
+# Issue #17:数据库地址从环境变量读取;支持 sqlite:///path / sqlite:path / 纯路径,
+# PostgreSQL(postgres://)未适配时打印提示并降级 SQLite。
 _DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 _POSTGRES_REQUESTED = _DATABASE_URL.startswith("postgres://") or _DATABASE_URL.startswith("postgresql://")
 if _POSTGRES_REQUESTED:
     print("⚠️ DATABASE_URL 指定了 PostgreSQL,但本项目尚未适配 psycopg2 与 SQL。"
           "需要安装 psycopg2 并适配 SQL 后重启;当前自动降级为 SQLite(data/game.db)。", flush=True)
+elif _DATABASE_URL:
+    if _DATABASE_URL.startswith("sqlite:///"):
+        _sqlite_path = _DATABASE_URL[len("sqlite:///"):]
+        if _sqlite_path.startswith("file:"):
+            _sqlite_path = _sqlite_path[len("file:"):].split("?", 1)[0]
+        config.DB_PATH = os.path.abspath(os.path.expanduser(_sqlite_path))
+    elif _DATABASE_URL.startswith("sqlite:"):
+        config.DB_PATH = os.path.abspath(os.path.expanduser(_DATABASE_URL[len("sqlite:"):]))
+    else:
+        config.DB_PATH = os.path.abspath(os.path.expanduser(_DATABASE_URL))
+    config.DATA_DIR = os.path.dirname(config.DB_PATH)
 
 
 def db():
