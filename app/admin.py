@@ -3,6 +3,7 @@
 
 管理员判定:登录用户 role=admin(me(admin=True) 返回 False 时一律 403,与原实现一致)。
 """
+import secrets
 import time
 from datetime import date, timedelta
 
@@ -18,6 +19,24 @@ from .wallet import change_points, log
 router = APIRouter()
 
 
+def admin_audit(conn, admin_id, admin_name, action, target=None, before_value=None,
+                after_value=None, reason=None, request_id=None, ip=""):
+    """记录管理员操作审计(高风险操作:封禁/解封、角色变更、调账、删除内容、审核处理、配置发布)。
+    调用方需在事务内插入;由后续 log()/conn.commit() 一并持久化。"""
+    conn.execute(
+        "INSERT INTO admin_audit(admin_id,admin_name,target,action,before_value,after_value,reason,request_id,ip,created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (admin_id, admin_name, target, action, before_value, after_value, reason, request_id, ip, time.time()))
+
+
+def _add_risk_event(conn, user_id, username, rule, level="medium", note=""):
+    """写入风险事件(异常对局/账号风险中心)。默认 pending,由管理员 review 后置 reviewed。"""
+    conn.execute(
+        "INSERT INTO risk_events(user_id,username,rule,level,status,note,created_at) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (user_id, username, rule, level, "pending", note, time.time()))
+
+
 def ensure_admins():
     """启动时将 ADMIN_USERS / ADMIN_INIT 中的存量用户提升为 admin(幂等)"""
     names = [n for n in config.ADMIN_USERS + config.ADMIN_INIT if n]
@@ -28,6 +47,9 @@ def ensure_admins():
             u = get_user_by_name(conn, n)
             if u and u["role"] != "admin":
                 conn.execute("UPDATE users SET role='admin' WHERE id=?", (u["id"],))
+                admin_audit(conn, u["id"], n, "role_change", target=n,
+                            before_value=u["role"], after_value="admin",
+                            reason="预设管理员名单提升", request_id="startup")
                 log(conn, u["id"], n, "admin_op", "预设管理员提升")
                 conn.commit()
 
@@ -344,9 +366,13 @@ async def admin_config_publish(request: Request):
     if err is not None:
         return err
     name = str(data.get("name", "")).strip()
+    request_id = str(data.get("request_id", "")).strip() or secrets.token_hex(8)
     try:
         with _lock, db() as conn:
             ver = config_publish(conn, name, user["username"])
+            admin_audit(conn, user["id"], user["username"], "config_publish",
+                        target=name, after_value=f"v{ver}",
+                        request_id=request_id, ip=ip)
             log(conn, user["id"], user["username"], "config_publish",
                 f"发布参数 {name}（v{ver}）", ip=ip)
             conn.commit()
@@ -365,9 +391,13 @@ async def admin_config_rollback(request: Request):
     if err is not None:
         return err
     name = str(data.get("name", "")).strip()
+    request_id = str(data.get("request_id", "")).strip() or secrets.token_hex(8)
     try:
         with _lock, db() as conn:
             res = config_rollback(conn, name, user["username"])
+            admin_audit(conn, user["id"], user["username"], "config_rollback",
+                        target=name, after_value=f"{res['value']}(v{res['version']})",
+                        request_id=request_id, ip=ip)
             log(conn, user["id"], user["username"], "config_rollback",
                 f"回滚参数 {name} → {res['value']}（v{res['version']}）", ip=ip)
             conn.commit()
@@ -438,6 +468,7 @@ async def admin_kick_session(request: Request):
         uid = int(data.get("user_id", 0))
     except Exception:
         uid = 0
+    request_id = str(data.get("request_id", "")).strip() or secrets.token_hex(8)
     with _lock, db() as conn:
         target = get_user_by_name(conn, name) if name else None
         if target is None and uid:
@@ -446,6 +477,9 @@ async def admin_kick_session(request: Request):
             return json_response(400, {"error": "用户不存在"})
         cur = conn.execute("DELETE FROM sessions WHERE user_id=?", (target["id"],))
         kicked = cur.rowcount
+        admin_audit(conn, user["id"], user["username"], "kick_session",
+                    target=target["username"], after_value=f"注销{kicked}个会话",
+                    reason=None, request_id=request_id, ip=ip)
         log(conn, user["id"], user["username"], "admin_op",
             f"强制下线 {target['username']}(注销 {kicked} 个会话)", ip=ip)
         conn.commit()
@@ -469,12 +503,18 @@ async def admin_set_balance(request: Request):
     if not uid or abs(amount) > 1000000:
         return json_response(400, {"error": "参数不合法"})
     note = str(data.get("note", ""))[:100]
+    request_id = str(data.get("request_id", "")).strip() or secrets.token_hex(8)
     with _lock, db() as conn:
         target = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
         if not target:
             return json_response(400, {"error": "用户不存在"})
+        before = target["points"]
         points = change_points(conn, uid, target["username"], amount,
                                "admin_balance", f"管理员调整余额 {note}".strip(), ip)
+        admin_audit(conn, user["id"], user["username"], "balance_adjust",
+                    target=target["username"],
+                    before_value=str(before), after_value=str(points),
+                    reason=note or None, request_id=request_id, ip=ip)
         log(conn, user["id"], user["username"], "admin_op", f"给 {target['username']} 调整余额", amount, ip)
         conn.commit()
     return json_response(200, {"ok": True, "points": points})
@@ -494,6 +534,7 @@ async def admin_toggle_status(request: Request):
     except Exception:
         return json_response(400, {"error": "参数错误"})
     reason = str(data.get("reason", "")).strip()[:100]
+    request_id = str(data.get("request_id", "")).strip() or secrets.token_hex(8)
     with _lock, db() as conn:
         target = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
         if not target:
@@ -501,8 +542,14 @@ async def admin_toggle_status(request: Request):
         if target["role"] == "admin" and target["id"] != user["id"]:
             return json_response(400, {"error": "不能操作其他管理员"})
         new = "banned" if target["status"] == "active" else "active"
+        before = target["status"]
         conn.execute("UPDATE users SET status=? WHERE id=?", (new, uid))
         conn.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        admin_audit(conn, user["id"], user["username"],
+                    "unban" if new == "active" else "ban",
+                    target=target["username"],
+                    before_value=before, after_value=new,
+                    reason=reason or None, request_id=request_id, ip=ip)
         detail = f"封禁/解封 {target['username']} → {new}"
         if reason:
             detail += f"，理由：{reason}"
@@ -549,8 +596,203 @@ async def admin_del_bottle(request: Request):
         bid = int(data.get("id", 0))
     except Exception:
         return json_response(400, {"error": "参数错误"})
+    reason = str(data.get("reason", "")).strip()[:200]
+    request_id = str(data.get("request_id", "")).strip() or secrets.token_hex(8)
     with _lock, db() as conn:
+        row = conn.execute("SELECT content FROM bottles WHERE id=?", (bid,)).fetchone()
+        if row:
+            admin_audit(conn, user["id"], user["username"], "del_bottle",
+                        target=f"bottle#{bid}",
+                        before_value=(row["content"] or "")[:200],
+                        reason=reason or None, request_id=request_id, ip=ip)
         conn.execute("DELETE FROM bottles WHERE id=?", (bid,))
-        log(conn, user["id"], user["username"], "admin_op", f"删除漂流瓶 #{bid}", ip=ip)
+        detail = f"删除漂流瓶 #{bid}"
+        if reason:
+            detail += f"，理由：{reason}"
+        log(conn, user["id"], user["username"], "admin_op", detail, ip=ip)
         conn.commit()
     return json_response(200, {"ok": True})
+
+
+# ============ Issue #22:风险事件列表 / 复核 ============
+@router.get("/api/admin/risk-list")
+def admin_risk_list(request: Request):
+    user, err = _admin_or_403(request)
+    if err is not None:
+        return err
+    status = request.query_params.get("status", "").strip()
+    with _lock, db() as conn:
+        cond, args = [], []
+        if status in ("pending", "reviewed"):
+            cond.append("status=?")
+            args.append(status)
+        where = (" WHERE " + " AND ".join(cond)) if cond else ""
+        rows = conn.execute(
+            f"SELECT * FROM risk_events{where} ORDER BY id DESC LIMIT 200", args).fetchall()
+        summary = conn.execute(
+            """SELECT user_id, username, COUNT(*) cnt,
+               SUM(CASE WHEN level='high' THEN 1 ELSE 0 END) high,
+               SUM(CASE WHEN level='medium' THEN 1 ELSE 0 END) medium,
+               SUM(CASE WHEN level='low' THEN 1 ELSE 0 END) low,
+               SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending
+               FROM risk_events GROUP BY user_id, username ORDER BY cnt DESC""").fetchall()
+    return json_response(200, {"list": [dict(r) for r in rows],
+                               "summary": [dict(r) for r in summary]})
+
+
+@router.post("/api/admin/risk-review")
+async def admin_risk_review(request: Request):
+    data = await parse_body(request)
+    if data is None:
+        return json_response(400, {"error": "请求格式错误"})
+    ip = request.client.host if request.client else ""
+    user, err = _admin_or_403(request)
+    if err is not None:
+        return err
+    try:
+        rid = int(data.get("id", 0))
+    except Exception:
+        return json_response(400, {"error": "参数错误"})
+    note = str(data.get("note", "")).strip()[:200]
+    request_id = str(data.get("request_id", "")).strip() or secrets.token_hex(8)
+    with _lock, db() as conn:
+        cur = conn.execute("UPDATE risk_events SET status='reviewed', note=? WHERE id=?",
+                           (note or None, rid))
+        if cur.rowcount == 0:
+            return json_response(404, {"error": "风险事件不存在"})
+        admin_audit(conn, user["id"], user["username"], "risk_review",
+                    target=f"risk#{rid}", before_value="pending",
+                    after_value="reviewed", reason=note or None,
+                    request_id=request_id, ip=ip)
+        log(conn, user["id"], user["username"], "admin_op", f"风险事件 #{rid} 已复核", ip=ip)
+        conn.commit()
+    return json_response(200, {"ok": True})
+
+
+# ============ Issue #23:举报队列 / 处理 ============
+@router.get("/api/admin/report-list")
+def admin_report_list(request: Request):
+    user, err = _admin_or_403(request)
+    if err is not None:
+        return err
+    status = request.query_params.get("status", "").strip()
+    with _lock, db() as conn:
+        cond, args = ["1=1"], []
+        if status in ("pending", "handled", "rejected"):
+            cond.append("r.status=?")
+            args.append(status)
+        rows = conn.execute(
+            """SELECT r.*, COALESCE(u.username,'-') AS reporter_name
+               FROM reports r LEFT JOIN users u ON u.id=r.reporter_id
+               WHERE {where} ORDER BY r.id DESC LIMIT 200""".format(where=" AND ".join(cond)),
+            args).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            if r["content_type"] == "bottle":
+                b = conn.execute("SELECT user_id, username, content, hidden FROM bottles WHERE id=?",
+                                 (r["content_id"],)).fetchone()
+                d["content"] = b["content"] if b else None
+                d["content_owner"] = b["username"] if b else None
+                d["user_id"] = b["user_id"] if b else None
+                d["hidden"] = bool(b["hidden"]) if b else None
+            else:
+                m = conn.execute("SELECT from_id, title, content, hidden FROM mail WHERE id=?",
+                                 (r["content_id"],)).fetchone()
+                d["content"] = (m["title"] + "：" + m["content"]) if m else None
+                d["content_owner"] = None
+                d["user_id"] = m["from_id"] if m else None
+                d["hidden"] = bool(m["hidden"]) if m else None
+                if m and m["from_id"]:
+                    fr = conn.execute("SELECT username FROM users WHERE id=?", (m["from_id"],)).fetchone()
+                    d["content_owner"] = fr["username"] if fr else None
+            out.append(d)
+    return json_response(200, {"list": out})
+
+
+@router.post("/api/admin/report-handle")
+async def admin_report_handle(request: Request):
+    data = await parse_body(request)
+    if data is None:
+        return json_response(400, {"error": "请求格式错误"})
+    ip = request.client.host if request.client else ""
+    user, err = _admin_or_403(request)
+    if err is not None:
+        return err
+    try:
+        rid = int(data.get("id", 0))
+    except Exception:
+        return json_response(400, {"error": "参数错误"})
+    action = str(data.get("action", ""))
+    note = str(data.get("note", "")).strip()[:200]
+    if action not in ("hide", "reject", "warn"):
+        return json_response(400, {"error": "处理动作不合法"})
+    request_id = str(data.get("request_id", "")).strip() or secrets.token_hex(8)
+    with _lock, db() as conn:
+        rep = conn.execute("SELECT * FROM reports WHERE id=?", (rid,)).fetchone()
+        if not rep:
+            return json_response(404, {"error": "举报不存在"})
+        if rep["status"] != "pending":
+            return json_response(400, {"error": "该举报已处理"})
+        status = "handled"
+        if action == "hide":
+            table = "bottles" if rep["content_type"] == "bottle" else "mail"
+            conn.execute(f"UPDATE {table} SET hidden=1 WHERE id=?", (rep["content_id"],))
+        elif action == "warn":
+            offender_id = None
+            if rep["content_type"] == "bottle":
+                b = conn.execute("SELECT user_id FROM bottles WHERE id=?",
+                                 (rep["content_id"],)).fetchone()
+                offender_id = b["user_id"] if b else None
+            else:
+                m = conn.execute("SELECT from_id FROM mail WHERE id=?", (rep["content_id"],)).fetchone()
+                offender_id = m["from_id"] if m else None
+            if offender_id:
+                conn.execute(
+                    "INSERT INTO mail(from_id,to_id,title,content,mtype,created_at) VALUES(?,?,?,?,?,?)",
+                    (user["id"], offender_id, "内容审核警告",
+                     f"你的{'漂流瓶' if rep['content_type'] == 'bottle' else '站内信'}因被举报已收到警告，请注意文明发言。"
+                     + (f"备注：{note}" if note else ""),
+                     "system", time.time()))
+        elif action == "reject":
+            status = "rejected"
+        conn.execute("UPDATE reports SET status=?, handled_by=?, note=? WHERE id=?",
+                     (status, user["username"], note or None, rid))
+        admin_audit(conn, user["id"], user["username"], "report_handle",
+                    target=f"report#{rid}", before_value="pending",
+                    after_value=status, reason=note or None,
+                    request_id=request_id, ip=ip)
+        log(conn, user["id"], user["username"], "admin_op",
+            f"处理举报 #{rid}（{action}）", ip=ip)
+        conn.commit()
+    return json_response(200, {"ok": True})
+
+
+# ============ Issue #24:管理员操作审计日志 ============
+@router.get("/api/admin/audit-list")
+def admin_audit_list(request: Request):
+    user, err = _admin_or_403(request)
+    if err is not None:
+        return err
+    admin_name = request.query_params.get("admin", "").strip()
+    target = request.query_params.get("target", "").strip()
+    action = request.query_params.get("action", "").strip()
+    cond, args = ["1=1"], []
+    if admin_name:
+        cond.append("admin_name=?")
+        args.append(admin_name)
+    if target:
+        cond.append("target=?")
+        args.append(target)
+    if action:
+        cond.append("action=?")
+        args.append(action)
+    with _lock, db() as conn:
+        total = conn.execute(
+            f"SELECT COUNT(*) c FROM admin_audit WHERE {' AND '.join(cond)}", args).fetchone()["c"]
+        rows = conn.execute(
+            f"""SELECT * FROM admin_audit WHERE {' AND '.join(cond)}
+                ORDER BY id DESC LIMIT 100""", args).fetchall()
+        actions = [r["action"] for r in conn.execute(
+            "SELECT DISTINCT action FROM admin_audit ORDER BY action").fetchall()]
+    return json_response(200, {"list": [dict(r) for r in rows], "total": total, "actions": actions})

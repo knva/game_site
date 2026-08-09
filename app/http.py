@@ -34,16 +34,18 @@ def cookie_token(request: Request):
     for part in raw.split(";"):
         part = part.strip()
         if part.startswith(config.SESSION_COOKIE + "="):
-            return part[len(config.SESSION_COOKIE):]
+            return part[len(config.SESSION_COOKIE) + 1:]
     return ""
 
 
 def set_session_cookie(response: Response, token: str):
     response.set_cookie(config.SESSION_COOKIE, token,
                         max_age=config.LOGIN_SESSION_DAYS * 86400,
-                        httponly=True, samesite="lax", path="/")
+                        httponly=True, samesite="lax", path="/",
+                        secure=config.COOKIE_SECURE)
 
 
 def clear_session_cookie(response: Response):
     response.set_cookie(config.SESSION_COOKIE, "", max_age=0,
-                        httponly=True, samesite="lax", path="/")
+                        httponly=True, samesite="lax", path="/",
+                        secure=config.COOKIE_SECURE)

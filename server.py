@@ -34,6 +34,8 @@ WELCOME_POINTS = 100
 LOGIN_SESSION_DAYS = 7
 GAME_SESSION_MINUTES = 30
 SESSION_COOKIE = "gs_session"  # HttpOnly 会话 Cookie(同源请求自动携带)
+# Issue #51:生产 https 下会话 Cookie 加 Secure(环境变量 COOKIE_SECURE=1 开启;本地 http 默认不加)
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE") == "1"
 
 # 游戏防作弊参数
 GAMES = {
@@ -283,16 +285,32 @@ def _slot_expected_var():
 
 
 def _wheel_expected_prize():
-    """转盘每次期望产出:Σ(prize×weight)/Σweight("再转一次"按 prize=-1 计,期望值仍准确)"""
+    """转盘每次期望产出(修正版,Issue #54):
+    把"再转一次"免费券形成的递归免费转纳入期望计算。p_free = 免费扇区权重占比,
+    每次付费转动:以 1-p_free 直接产出 E0,以 p_free 获得一次价值同为 E 的免费转:
+    E = E0 + p_free·E → E = E0/(1-p_free)(等价 p_extra = p_free/(1-p_free))。
+    免费扇区自身 prize 记 0(不再用 -1 当作真实产出)。"""
     total = sum(WHEEL_WEIGHTS)
-    return round(sum(WHEEL_SECTORS[i]["prize"] * WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))) / total, 2)
+    p_free = sum(WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))
+                 if WHEEL_SECTORS[i]["prize"] == -1) / total
+    e0 = sum(WHEEL_SECTORS[i]["prize"] * WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))
+             if WHEEL_SECTORS[i]["prize"] != -1) / total
+    if p_free >= 1:
+        return round(e0, 2)
+    return round(e0 / (1 - p_free), 2)
 
 
 def _wheel_expected_var():
-    """转盘期望产出方差"""
+    """转盘期望产出方差(修正版,Issue #54):
+    X = X0 + B·X(B=1 表示中"再转一次"、X0=0),E[X²] = E[X0²] + p_free·E[X²]
+    → E[X²] = E[X0²]/(1-p_free);Var = E[X²] - E[X]²。"""
     total = sum(WHEEL_WEIGHTS)
+    p_free = sum(WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))
+                 if WHEEL_SECTORS[i]["prize"] == -1) / total
     e = _wheel_expected_prize()
-    e2 = sum(WHEEL_SECTORS[i]["prize"] ** 2 * WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))) / total
+    e0_2 = sum(WHEEL_SECTORS[i]["prize"] ** 2 * WHEEL_WEIGHTS[i] for i in range(len(WHEEL_SECTORS))
+               if WHEEL_SECTORS[i]["prize"] != -1) / total
+    e2 = e0_2 / (1 - p_free) if p_free < 1 else e0_2
     return round(e2 - e * e, 1)
 
 
@@ -342,7 +360,22 @@ GAME_ECONOMY = {
 
 
 def game_odds():
-    """公开收益模型(/api/game/odds):各玩法门票/期望/方差/返奖率 + 农场作物收益-时长比。"""
+    """公开收益模型(/api/game/odds):各玩法门票/期望/方差/返奖率 + 农场作物收益-时长比。
+
+    Issue #54:不再使用导入时硬编码的 GAME_ECONOMY,每次请求动态读取已发布配置
+    (config_get,带 TTL/版本号缓存)计算门票/期望/上限,并附带当前已发布配置版本号。
+    """
+    gm_ticket = config_get("goldminer_ticket", GOLDMINER_TICKET)
+    gm_min = config_get("goldminer_pay_min", GOLDMINER_PAY_MIN)
+    gm_max = config_get("goldminer_pay_max", GOLDMINER_PAY_MAX)
+    slot_ticket = config_get("slot_cost", SLOT_COST)
+    wheel_ticket = config_get("wheel_cost", WHEEL_COST)
+    slot_exp = _slot_expected_payout()
+    wheel_exp = _wheel_expected_prize()
+    wheel_var = _wheel_expected_var()
+    gm_exp = round((gm_min + gm_max) / 2, 1)
+    gm_var = round(((gm_max - gm_min + 1) ** 2 - 1) / 12, 1)
+
     farm_crops = {}
     for c, info in CROPS.items():
         net = info["sell"] - info["cost"]
@@ -360,10 +393,44 @@ def game_odds():
         return round(sum(farm_crops[k]["profit_per_min"] for k in keys) / len(keys), 2) if keys else None
 
     return {
-        "goldminer": {"name": "黄金矿工", **GAME_ECONOMY["goldminer"]},
-        "slot": {"name": "水果老虎机", **GAME_ECONOMY["slot"]},
-        "wheel": {"name": "幸运大转盘", **GAME_ECONOMY["wheel"]},
-        "rhythm": {"name": "音乐游戏", **GAME_ECONOMY["rhythm"]},
+        "config_version": config_version(),
+        "goldminer": {
+            "name": "黄金矿工",
+            "ticket": gm_ticket,
+            "pay_range": [gm_min, gm_max],
+            "expected": gm_exp,
+            "variance": gm_var,
+            "daily_limit": GOLDMINER_DAILY_LIMIT,
+            "rtp": round(gm_exp / gm_ticket, 3) if gm_ticket else None,
+        },
+        "slot": {
+            "name": "水果老虎机",
+            "ticket": slot_ticket,
+            "pay_range": [0, max(SLOT_SYMBOLS[s]["x3"] for s in SLOT_SYMBOLS)],
+            "expected": slot_exp,
+            "variance": _slot_expected_var(),
+            "daily_limit": SLOT_DAILY_MAX,
+            "rtp": round(slot_exp / slot_ticket, 3) if slot_ticket else None,
+        },
+        "wheel": {
+            "name": "幸运大转盘",
+            "ticket": wheel_ticket,
+            "pay_range": [min(s["prize"] for s in WHEEL_SECTORS), max(s["prize"] for s in WHEEL_SECTORS)],
+            "expected": wheel_exp,
+            "variance": wheel_var,
+            "daily_limit": None,   # 无独立日上限,受频率限制与全局每日可赚上限约束
+            "rtp": round(wheel_exp / wheel_ticket, 3) if wheel_ticket else None,
+        },
+        "rhythm": {
+            "name": "音乐游戏",
+            "ticket": 0,
+            "pay_range": [0, None],
+            "expected": None,
+            "expected_range": [3000, 6000],
+            "variance": None,
+            "daily_limit": SUBMIT_PER_DAY,
+            "rtp": None,
+        },
         "farm": {
             "crops": farm_crops,
             "compare": {
@@ -649,6 +716,11 @@ def init_db():
             updated_by TEXT,
             created_at REAL NOT NULL,
             PRIMARY KEY(name, version))""")
+        # Issue #53:全局配置发布版本号(单行,自增)。多 worker 发布/回滚后据此立即感知变更。
+        conn.execute("""CREATE TABLE IF NOT EXISTS config_version(
+            id INTEGER PRIMARY KEY,
+            version INTEGER NOT NULL DEFAULT 0)""")
+        conn.execute("INSERT OR IGNORE INTO config_version(id,version) VALUES(1,0)")
         # Issue #22:风险事件(异常对局/账号风险,等级+状态流转 pending→reviewed)
         conn.execute("""CREATE TABLE IF NOT EXISTS risk_events(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -882,6 +954,10 @@ CONFIG_DESCS = {
 _config_cache = {}
 _config_cache_lock = threading.Lock()
 
+# Issue #53:进程内缓存 TTL(秒)。多 worker 下每个 worker 各自缓存,
+# 超过 TTL 自动重读 DB;版本号变化时(见 config_version)立即重读,不等 TTL。
+CONFIG_TTL = 30.0
+
 
 def _parse_config_value(raw):
     s = str(raw).strip()
@@ -902,14 +978,55 @@ def config_invalidate(name=None):
             _config_cache.pop(name, None)
 
 
-def config_get(name, default=None):
-    """读取已发布参数(带内存缓存);无记录或异常时回退硬编码默认值。"""
-    with _config_cache_lock:
-        if name in _config_cache:
-            return _config_cache[name]
-    val = default
+def _config_db_version(conn):
+    """读取当前已发布配置版本号(config_version 表,单行)。"""
+    try:
+        row = conn.execute("SELECT version FROM config_version").fetchone()
+        return row["version"] if row else 0
+    except Exception:
+        return 0
+
+
+def config_version():
+    """当前已发布配置的全局版本号(无记录时 0)。"""
     try:
         with _lock, db() as conn:
+            return _config_db_version(conn)
+    except Exception:
+        return 0
+
+
+def _read_config_version():
+    """单独读取版本号(快速单行查询,用于 TTL 内版本变化检测)。"""
+    try:
+        with _lock, db() as conn:
+            return _config_db_version(conn)
+    except Exception:
+        return 0
+
+
+def config_get(name, default=None):
+    """读取已发布参数(带内存缓存);无记录或异常时回退硬编码默认值。
+
+    Issue #53 多 worker 一致性:
+    - 缓存带 TTL(CONFIG_TTL),过期自动重读 DB → 多 worker 最迟 TTL 后一致;
+    - 每次调用比对 config_version 版本号,版本变化时立即重读(不等 TTL)。
+    """
+    now = time.time()
+    with _config_cache_lock:
+        entry = _config_cache.get(name)
+    if entry:
+        value, version, read_at = entry
+        if now - read_at < CONFIG_TTL:
+            # TTL 内仍需比对版本号:发布/回滚会自增 config_version,跨进程立即感知
+            cur_version = _read_config_version()
+            if cur_version == version:
+                return value
+    val = default
+    version = 0
+    try:
+        with _lock, db() as conn:
+            version = _config_db_version(conn)
             row = conn.execute(
                 "SELECT value FROM game_configs WHERE name=? AND status='published' "
                 "ORDER BY version DESC LIMIT 1", (name,)).fetchone()
@@ -918,7 +1035,7 @@ def config_get(name, default=None):
     except Exception:
         val = default
     with _config_cache_lock:
-        _config_cache[name] = val
+        _config_cache[name] = (val, version, time.time())
     return val
 
 
@@ -973,6 +1090,7 @@ def config_publish(conn, name, operator):
         raise ValueError("没有待发布的草稿")
     conn.execute("UPDATE game_configs SET status='published', updated_by=? WHERE name=? AND version=?",
                  (operator, name, draft["version"]))
+    _bump_config_version(conn)
     conn.commit()
     config_invalidate(name)
     return draft["version"]
@@ -999,9 +1117,17 @@ def config_rollback(conn, name, operator):
     conn.execute("INSERT INTO game_configs(name,value,version,status,updated_by,created_at) "
                  "VALUES(?,?,?,?,?,?)",
                  (name, prev_value, ver, "published", operator, time.time()))
+    _bump_config_version(conn)
     conn.commit()
     config_invalidate(name)
     return {"version": ver, "value": prev_value}
+
+
+def _bump_config_version(conn):
+    """发布/回滚时自增 config_version(单行,幂等)。多 worker 据此立即感知配置变更。"""
+    conn.execute(
+        "INSERT INTO config_version(id,version) VALUES(1,1) "
+        "ON CONFLICT(id) DO UPDATE SET version=version+1")
 
 
 def _admin_config_list(conn):
@@ -1759,11 +1885,13 @@ class Handler(BaseHTTPRequestHandler):
         return ""
 
     def _set_session_cookie(self, token):
+        secure = "; Secure" if COOKIE_SECURE else ""
         self._session_cookie = (f"{SESSION_COOKIE}={token}; HttpOnly; Path=/; SameSite=Lax; "
-                                f"Max-Age={LOGIN_SESSION_DAYS * 86400}")
+                                f"Max-Age={LOGIN_SESSION_DAYS * 86400}{secure}")
 
     def _clear_session_cookie(self):
-        self._session_cookie = f"{SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0"
+        secure = "; Secure" if COOKIE_SECURE else ""
+        self._session_cookie = f"{SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0{secure}"
 
     def _read_json(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -1911,22 +2039,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"list": out, "cost": BOTTLE_COST})
 
         if path == "/api/bottle/pick":
-            user = self._me()
-            if not user:
-                return self._send(401, {"error": "未登录"})
-            if not rate_check(f"bottlepick:{user['username']}", BOTTLE_PICK_DAILY, 86400):
-                return self._send(429, {"error": f"每天最多捡 {BOTTLE_PICK_DAILY} 个漂流瓶，明天再来吧"})
-            with _lock, db() as conn:
-                row = conn.execute(
-                    """SELECT * FROM bottles WHERE picked=0 AND user_id<>? AND hidden=0
-                       ORDER BY RANDOM() LIMIT 1""", (user["id"],)).fetchone()
-                if not row:
-                    return self._send(200, {"bottle": None})
-                conn.execute("UPDATE bottles SET picked=1, picked_by=?, views=views+1 WHERE id=?",
-                             (user["username"], row["id"]))
-                log(conn, user["id"], user["username"], "bottle_pick", f"捡起第{row['id']}号漂流瓶")
-                conn.commit()
-                return self._send(200, {"bottle": dict(row)})
+            # Issue #52:捡漂流瓶是有副作用的操作,只允许 POST(GET 不产生任何副作用)。
+            return self._send(400, {"error": "请使用 POST /api/bottle/pick 捞瓶子"})
 
         if path == "/api/admin/users":
             user = self._me(admin=True)
@@ -2366,9 +2480,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._set_session_cookie(token)
                 log(conn, uid, username, "register", "新用户注册", ip=ip)
                 conn.commit()
-            return self._send(200, {"ok": True, "token": token, "user": {
+            body = {"ok": True, "user": {
                 "id": uid, "username": username, "points": WELCOME_POINTS, "role": role},
-                "msg": f"注册成功，赠送 {WELCOME_POINTS} 积分！"})
+                "msg": f"注册成功，赠送 {WELCOME_POINTS} 积分！"}
+            # Issue #51:默认响应不向浏览器暴露 token(会话经 Set-Cookie 建立);
+            # 仅当请求头带 X-Token(API 客户端模式)时回传新 token 以兼容存量客户端。
+            if (self.headers.get("X-Token") or "").strip():
+                body["token"] = token
+            return self._send(200, body)
 
         if path == "/api/login":
             username = str(data.get("username", "")).strip()
@@ -2386,8 +2505,12 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("UPDATE users SET last_login=? WHERE id=?", (time.time(), row["id"]))
                 log(conn, row["id"], username, "login", "登录成功", ip=ip)
                 conn.commit()
-            return self._send(200, {"ok": True, "token": token, "user": {
-                "id": row["id"], "username": username, "points": row["points"], "role": row["role"]}})
+            body = {"ok": True, "user": {
+                "id": row["id"], "username": username, "points": row["points"], "role": row["role"]}}
+            # Issue #51:默认响应不向浏览器暴露 token;仅 API 客户端模式(X-Token 请求头)回传新 token。
+            if (self.headers.get("X-Token") or "").strip():
+                body["token"] = token
+            return self._send(200, body)
 
         if path == "/api/logout":
             token = (self.headers.get("X-Token") or "").strip()
@@ -3235,6 +3358,25 @@ class Handler(BaseHTTPRequestHandler):
                 points = change_points(conn, user["id"], user["username"], -BOTTLE_COST,
                                        "bottle_throw", "投放漂流瓶", ip)
             return self._send(200, {"ok": True, "points": points})
+
+        # ============ Issue #52:捡漂流瓶(有副作用,改为 POST) ============
+        if path == "/api/bottle/pick":
+            user = self._me()
+            if not user:
+                return self._send(401, {"error": "未登录"})
+            if not rate_check(f"bottlepick:{user['username']}", BOTTLE_PICK_DAILY, 86400):
+                return self._send(429, {"error": f"每天最多捡 {BOTTLE_PICK_DAILY} 个漂流瓶，明天再来吧"})
+            with _lock, db() as conn:
+                row = conn.execute(
+                    """SELECT * FROM bottles WHERE picked=0 AND user_id<>? AND hidden=0
+                       ORDER BY RANDOM() LIMIT 1""", (user["id"],)).fetchone()
+                if not row:
+                    return self._send(200, {"bottle": None})
+                conn.execute("UPDATE bottles SET picked=1, picked_by=?, views=views+1 WHERE id=?",
+                             (user["username"], row["id"]))
+                log(conn, user["id"], user["username"], "bottle_pick", f"捡起第{row['id']}号漂流瓶")
+                conn.commit()
+                return self._send(200, {"bottle": dict(row)})
 
         # ============ 水果老虎机（服务器随机判定） ============
         if path == "/api/slot/spin":

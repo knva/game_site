@@ -67,7 +67,7 @@ const Api = {
   mailRead: (id) => Api.post("/api/mail/read", { id }),
 
   bottleFeed: () => Api.get("/api/bottle/feed"),
-  bottlePick: () => Api.get("/api/bottle/pick"),
+  bottlePick: () => Api.post("/api/bottle/pick"),
   bottleThrow: (content) => Api.post("/api/bottle/throw", { content }),
 
   gomokuCreate: (mode) => Api.post("/api/gomoku/create", { mode }),

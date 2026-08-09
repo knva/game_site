@@ -199,9 +199,14 @@ async def register(request: Request):
         token = new_session(conn, uid, ip)
         log(conn, uid, username, "register", "新用户注册", ip=ip)
         conn.commit()
-    resp = json_response(200, {"ok": True, "token": token, "user": {
+    body = {"ok": True, "user": {
         "id": uid, "username": username, "points": config.WELCOME_POINTS, "role": role},
-        "msg": f"注册成功，赠送 {config.WELCOME_POINTS} 积分！"})
+        "msg": f"注册成功，赠送 {config.WELCOME_POINTS} 积分！"}
+    # Issue #51:默认响应不向浏览器暴露 token(会话经 Set-Cookie 建立);
+    # 仅当请求头带 X-Token(API 客户端模式)时回传新 token 以兼容存量客户端。
+    if (request.headers.get("X-Token") or "").strip():
+        body["token"] = token
+    resp = json_response(200, body)
     set_session_cookie(resp, token)
     return resp
 
@@ -226,8 +231,12 @@ async def login(request: Request):
         conn.execute("UPDATE users SET last_login=? WHERE id=?", (time.time(), row["id"]))
         log(conn, row["id"], username, "login", "登录成功", ip=ip)
         conn.commit()
-    resp = json_response(200, {"ok": True, "token": token, "user": {
-        "id": row["id"], "username": username, "points": row["points"], "role": row["role"]}})
+    body = {"ok": True, "user": {
+        "id": row["id"], "username": username, "points": row["points"], "role": row["role"]}}
+    # Issue #51:默认响应不向浏览器暴露 token;仅 API 客户端模式(X-Token 请求头)回传新 token。
+    if (request.headers.get("X-Token") or "").strip():
+        body["token"] = token
+    resp = json_response(200, body)
     set_session_cookie(resp, token)
     return resp
 

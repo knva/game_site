@@ -33,6 +33,10 @@ CONFIG_DESCS = {
 _config_cache = {}
 _config_cache_lock = threading.Lock()
 
+# Issue #53:进程内缓存 TTL(秒)。多 worker 下每个 worker 各自缓存,
+# 超过 TTL 自动重读 DB;版本号变化时(见 config_version)立即重读,不等 TTL。
+CONFIG_TTL = 30.0
+
 
 def _parse_config_value(raw):
     s = str(raw).strip()
@@ -53,14 +57,46 @@ def config_invalidate(name=None):
             _config_cache.pop(name, None)
 
 
-def config_get(name, default=None):
-    """读取已发布参数(带内存缓存);无记录或异常时回退硬编码默认值。"""
-    with _config_cache_lock:
-        if name in _config_cache:
-            return _config_cache[name]
-    val = default
+def _config_db_version(conn):
+    """读取当前已发布配置版本号(config_version 表,单行)。"""
+    try:
+        row = conn.execute("SELECT version FROM config_version").fetchone()
+        return row["version"] if row else 0
+    except Exception:
+        return 0
+
+
+def config_version():
+    """当前已发布配置的全局版本号(无记录时 0)。"""
     try:
         with _lock, db() as conn:
+            return _config_db_version(conn)
+    except Exception:
+        return 0
+
+
+def config_get(name, default=None):
+    """读取已发布参数(带内存缓存);无记录或异常时回退硬编码默认值。
+
+    Issue #53 多 worker 一致性:
+    - 缓存带 TTL(CONFIG_TTL),过期自动重读 DB → 多 worker 最迟 TTL 后一致;
+    - 每次调用比对 config_version 版本号,版本变化时立即重读(不等 TTL)。
+    """
+    now = time.time()
+    with _config_cache_lock:
+        entry = _config_cache.get(name)
+    if entry:
+        value, version, read_at = entry
+        if now - read_at < CONFIG_TTL:
+            # TTL 内仍需比对版本号:发布/回滚会自增 config_version,跨进程立即感知
+            cur_version = _read_config_version()
+            if cur_version == version:
+                return value
+    val = default
+    version = 0
+    try:
+        with _lock, db() as conn:
+            version = _config_db_version(conn)
             row = conn.execute(
                 "SELECT value FROM game_configs WHERE name=? AND status='published' "
                 "ORDER BY version DESC LIMIT 1", (name,)).fetchone()
@@ -69,8 +105,17 @@ def config_get(name, default=None):
     except Exception:
         val = default
     with _config_cache_lock:
-        _config_cache[name] = val
+        _config_cache[name] = (val, version, time.time())
     return val
+
+
+def _read_config_version():
+    """单独读取版本号(快速单行查询,用于 TTL 内版本变化检测)。"""
+    try:
+        with _lock, db() as conn:
+            return _config_db_version(conn)
+    except Exception:
+        return 0
 
 
 def config_set(conn, name, value, operator):
@@ -124,6 +169,7 @@ def config_publish(conn, name, operator):
         raise ValueError("没有待发布的草稿")
     conn.execute("UPDATE game_configs SET status='published', updated_by=? WHERE name=? AND version=?",
                  (operator, name, draft["version"]))
+    _bump_config_version(conn)
     conn.commit()
     config_invalidate(name)
     return draft["version"]
@@ -150,9 +196,17 @@ def config_rollback(conn, name, operator):
     conn.execute("INSERT INTO game_configs(name,value,version,status,updated_by,created_at) "
                  "VALUES(?,?,?,?,?,?)",
                  (name, prev_value, ver, "published", operator, time.time()))
+    _bump_config_version(conn)
     conn.commit()
     config_invalidate(name)
     return {"version": ver, "value": prev_value}
+
+
+def _bump_config_version(conn):
+    """发布/回滚时自增 config_version(单行,幂等)。多 worker 据此立即感知配置变更。"""
+    conn.execute(
+        "INSERT INTO config_version(id,version) VALUES(1,1) "
+        "ON CONFLICT(id) DO UPDATE SET version=version+1")
 
 
 def admin_config_list(conn):

@@ -257,4 +257,50 @@ def init_db():
             updated_by TEXT,
             created_at REAL NOT NULL,
             PRIMARY KEY(name, version))""")
+        # Issue #53:全局配置发布版本号(单行,自增)。多 worker 发布/回滚后据此立即感知变更。
+        conn.execute("""CREATE TABLE IF NOT EXISTS config_version(
+            id INTEGER PRIMARY KEY,
+            version INTEGER NOT NULL DEFAULT 0)""")
+        # Issue #22:风险事件(异常对局/账号风险,等级+状态流转 pending→reviewed)
+        conn.execute("""CREATE TABLE IF NOT EXISTS risk_events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,        -- PG: id BIGSERIAL PRIMARY KEY
+            user_id INTEGER,
+            username TEXT,
+            rule TEXT NOT NULL,
+            level TEXT NOT NULL DEFAULT 'medium',
+            status TEXT NOT NULL DEFAULT 'pending',
+            note TEXT,
+            created_at REAL NOT NULL)""")
+        # Issue #23:内容举报(漂流瓶/站内信)审核队列
+        conn.execute("""CREATE TABLE IF NOT EXISTS reports(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,        -- PG: id BIGSERIAL PRIMARY KEY
+            content_type TEXT NOT NULL,
+            content_id INTEGER NOT NULL,
+            reporter_id INTEGER NOT NULL,
+            reason TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            handled_by TEXT,
+            note TEXT,
+            created_at REAL NOT NULL)""")
+        # Issue #24:管理员操作审计日志(高风险操作:封禁/解封、角色变更、调账、删除内容、审核处理、配置发布)
+        conn.execute("""CREATE TABLE IF NOT EXISTS admin_audit(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,        -- PG: id BIGSERIAL PRIMARY KEY
+            admin_id INTEGER NOT NULL,
+            admin_name TEXT NOT NULL,
+            target TEXT,
+            action TEXT NOT NULL,
+            before_value TEXT,
+            after_value TEXT,
+            reason TEXT,
+            request_id TEXT,
+            ip TEXT,
+            created_at REAL NOT NULL)""")
+        # 老库迁移:漂流瓶 / 站内信隐藏标记(hide 后不出现在公开列表)
+        _b_cols = [r["name"] for r in conn.execute("PRAGMA table_info(bottles)").fetchall()]
+        if "hidden" not in _b_cols:
+            conn.execute("ALTER TABLE bottles ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+        _m_cols = [r["name"] for r in conn.execute("PRAGMA table_info(mail)").fetchall()]
+        if "hidden" not in _m_cols:
+            conn.execute("ALTER TABLE mail ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+        conn.execute("INSERT OR IGNORE INTO config_version(id,version) VALUES(1,0)")
         conn.commit()
