@@ -181,10 +181,11 @@ function layout() {
   const R = w / 2;
   const fs = Math.max(13, Math.round(w / 28));
   labels.forEach((el, i) => {
+    // 扇区 i 中心角:从顶部(12点)顺时针 i*45+22.5°,与 conic-gradient 严格一致
     const a = (i * 45 + 22.5) * Math.PI / 180;
     el.style.fontSize = fs + "px";
-    el.style.left = (R + Math.cos(a) * R * 0.6) + "px";
-    el.style.top = (R + Math.sin(a) * R * 0.6) + "px";
+    el.style.left = (R + Math.sin(a) * R * 0.6) + "px";    // 顶部顺时针:x = R·sin(a)
+    el.style.top = (R - Math.cos(a) * R * 0.6) + "px";     //               y = R·(1-cos(a))
   });
 }
 window.addEventListener("resize", layout);
